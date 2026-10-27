@@ -98,6 +98,58 @@ def mean_capm(R_in, rf_in, mkt_in, lam=LAMBDA):
     return 12 * mu_star, beta
 
 
+def cov_raw(R_in):
+    return 12 * np.cov(R_in, rowvar=False, ddof=1)
+
+
+def cov_lw(R_in):
+    lw = LedoitWolf().fit(R_in)
+    return 12 * lw.covariance_, lw.shrinkage_
+
+
+def cov_lw_manual(R_in):
+    n, p = R_in.shape
+    X = R_in - R_in.mean(axis=0)  # demeaned x_k
+    S = X.T @ X / n  # divides by n
+    m = np.trace(S) / p
+    I = np.eye(p)
+    d2 = np.linalg.norm(S - m * I, "fro") ** 2
+    bbar2 = sum(np.linalg.norm(np.outer(x, x) - S, "fro") ** 2 for x in X) / n**2
+    b2 = min(bbar2, d2)
+    delta = b2 / d2
+    Sigma = (1 - delta) * S + delta * m * I
+    return 12 * Sigma, delta
+
+
+def estimate_window(R_in, rf_in, mkt_in):
+    mu_c, beta = mean_capm(R_in, rf_in, mkt_in)
+    S_lw, delta = cov_lw(R_in)
+    return {
+        "rf": rf_annual(rf_in),
+        "mu": {"raw": mean_raw(R_in), "capm": mu_c},
+        "cov": {"raw": cov_raw(R_in), "lw": S_lw},
+        "beta": beta,
+        "delta": delta,
+    }
+
+
+def estimate_all(R, RF, MKT, windows):
+    estimates = []
+    for k, (in_sl, sc_sl) in enumerate(windows):
+        assert in_sl.stop <= sc_sl.start, f"Look-ahead in trial {k + 1}"
+        est = estimate_window(R[in_sl], RF[in_sl], MKT[in_sl])
+
+        # verify sklearn against the Appendix B formula
+        S_man, d_man = cov_lw_manual(R[in_sl])
+        assert np.isclose(est["delta"], d_man), f"LW delta mismatch, trial {k + 1}"
+        assert np.allclose(
+            est["cov"]["lw"], S_man
+        ), f"LW matrix mismatch, trial {k + 1}"
+
+        estimates.append(est)
+    return estimates
+
+
 if __name__ == "__main__":
     # Load & check data
     R, RF, MKT, dates, w_client = load_data()
@@ -126,8 +178,15 @@ if __name__ == "__main__":
     ), "Scored slices do not cover rows 60-95 exactly once"
     assert all(ins.stop == out.start for ins, out in windows)
 
-    for k, (ins, out) in enumerate(windows):
+    estimates = estimate_all(R, RF, MKT, windows)
+
+    print(f"{'Trial':>5}  {'Estimate':>17}  {'Score':>17}  {'rf':>7}  {'LW delta':>8}")
+    for k, ((in_sl, sc_sl), est) in enumerate(zip(windows, estimates), start=1):
         print(
-            f"Trial {k:2d}: in-sample {dates[ins.start]} to {dates[ins.stop - 1]}, "
-            f"scored {dates[out.start]} to {dates[out.stop - 1]}"
+            f"{k:>5}  {str(dates[in_sl.start])}–{str(dates[in_sl.stop - 1])}  "
+            f"{str(dates[sc_sl.start])}–{str(dates[sc_sl.stop - 1])}  "
+            f"{est['rf']:7.4f}  {est['delta']:8.4f}"
         )
+
+    print("\nTrial 1 betas:")
+    print(pd.Series(estimates[0]["beta"], index=ASSET_COLS).round(3))

@@ -63,9 +63,6 @@ def get_client_weights(tickers=TICKERS, seed=42, tol=1e-6):
                 except ValueError:
                     print("    Please enter a number.")
                     continue
-                if value < 0:
-                    print("    Weights can't be negative.")
-                    continue
                 raw[ticker] = value
                 break
             if random_portfolio:
