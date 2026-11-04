@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from sklearn.covariance import LedoitWolf
+from scipy.optimize import minimize
 
 # Config
 DATA_FILE = "sector_etf_returns__96_mos_.xlsx"
@@ -23,6 +24,15 @@ CLIENT_WEIGHTS = {t: 1 / 11 for t in TICKERS}
 SEED = 42
 rng = np.random.default_rng(SEED)
 LAMBDA = 0.5
+
+CAP = 0.20
+N_CHECK = 20_000
+MEANS = ["raw", "capm"]
+COVS = ["raw", "lw"]
+CONSTRAINTS = ["unc", "long", "cap20"]
+CONFIGS = [(m, c, k) for m in MEANS for c in COVS for k in CONSTRAINTS]  # 12 configs
+
+rng_check = np.random.default_rng(SEED + 2)
 
 
 def load_data():
@@ -150,6 +160,11 @@ def estimate_all(R, RF, MKT, windows):
     return estimates
 
 
+def label(cfg):
+    m, c, k = cfg
+    return f"{m} mean | {'LW' if c == 'lw' else 'sample'} cov | {k}"
+
+
 if __name__ == "__main__":
     # Load & check data
     R, RF, MKT, dates, w_client = load_data()
@@ -190,3 +205,4 @@ if __name__ == "__main__":
 
     print("\nTrial 1 betas:")
     print(pd.Series(estimates[0]["beta"], index=ASSET_COLS).round(3))
+
