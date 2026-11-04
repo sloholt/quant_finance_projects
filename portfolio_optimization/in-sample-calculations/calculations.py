@@ -6,11 +6,19 @@
 - Capital Allocation Line & Fund Separation Theorem
 """
 
+import json
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-FILE = "sector_etf_returns__96_mos_.xlsx"
+FILE = (
+    Path(__file__).resolve().parent.parent / "data" / "sector_etf_returns__96_mos_.xlsx"
+)
+CLIENT_FILE = (
+    FILE.parent / "client_weights.json"
+)  # latest client weights, read by Part 2
 returns = pd.read_excel(
     FILE, sheet_name="Returns", index_col="Month End", parse_dates=True
 )
@@ -91,6 +99,18 @@ def get_client_weights(tickers=TICKERS, seed=42, tol=1e-6):
         if confirm in ("", "y", "yes"):
             return weights
         print()
+
+
+# Save / load the client's weights so Part 2 uses the same portfolio
+def save_client_weights(weights, path=CLIENT_FILE):
+    with open(path, "w") as f:
+        json.dump({t: float(w) for t, w in weights.items()}, f, indent=2)
+    print(f"Saved client weights to {path}")
+
+
+def load_client_weights(path=CLIENT_FILE):
+    with open(path) as f:
+        return json.load(f)
 
 
 def check_budget_constraint(portfolio, tol=1e-6):
@@ -526,6 +546,7 @@ if __name__ == "__main__":
     # Step 2: Client's portfolio
     client_weights = get_client_weights()
     check_budget_constraint(client_weights)
+    save_client_weights(client_weights)
     print("Client Portfolio:")
     client_metrics = get_portfolio_metrics(client_weights)
 
