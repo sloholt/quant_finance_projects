@@ -43,9 +43,6 @@ portfolio_optimization/
 
 ### TODOs
 
-- Add `__pycache__/` to `.gitignore` and decide whether `data/client_weights.json`
-  should be committed.
-- Add a `requirements.txt`.
 - Have the scripts save their charts automatically (right now they only call
   `plt.show()`; the PNGs were saved by hand).
 - Make the notebook read and write `data/client_weights.json` like the scripts do.
