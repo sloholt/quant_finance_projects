@@ -57,18 +57,9 @@ portfolio_optimization/
   are saved to `data/client_weights.json`, and Part 2 loads that file. If the
   file doesn't exist, Part 2 asks for the weights itself. To change the client,
   run Part 1 again (or delete the file).
-- **Folder names have hyphens.** `in-sample-calculations` can't be imported as a
-  normal package, so the Part 2 script adds it to `sys.path` to import from
-  `calculations.py`. Keep the folder structure as it is.
-- **The notebook loads data differently.** It was written for Google Colab
-  (`drive.mount(...)`) and reads the Excel file by its bare name. Put
-  `sector_etf_returns__96_mos_.xlsx` in the notebook's working directory, or
-  edit `FILE`. Skip the `drive.mount` cell when running locally.
 - **Unconstrained portfolios are extreme.** Some take gross exposure above 10x
   and individual weights above 800%. This is expected, and it is part of what
   the out-of-sample test shows.
-- **Part 2 takes a little while.** It runs SLSQP optimizations and 20,000-draw
-  random solver checks for every window.
 
 ## Setup / Installation
 
