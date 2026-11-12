@@ -244,6 +244,7 @@ def run_model(data, portfolio, factors):
 
     fgrs = grs_test(T, N, num_factors, alphas, F, RESIDCOVMAT)
     p_grs = f.sf(fgrs, N, T - N - num_factors)
+    f_crit = f.ppf(0.95, N, T - N - num_factors)
 
     # Fama-MacBeth regressions
     betas = get_betas(results)
@@ -256,8 +257,131 @@ def run_model(data, portfolio, factors):
         "regression": results,
         "grs_stat": fgrs,
         "grs_pvalue": p_grs,
+        "grs_fcrit": f_crit,
         "fama_macbeth": fm_results,
     }
+
+
+# =====================================
+# USER INPUT: DATE RANGE & FACTORS
+# =====================================
+
+DATE_COL = "Month"
+RF_COL = "RF"
+PORTFOLIO_COLS = [f"ME{i} BM{j}" for i in range(1, 6) for j in range(1, 6)]
+
+
+def load_data():
+    """Load the full data sheet, clean column names, and sort by month."""
+    data = pd.read_excel(file_path, sheet_name="Data", header=0)
+    data.columns = data.columns.str.strip()
+    data = data.dropna(subset=[DATE_COL]).copy()
+    data[DATE_COL] = data[DATE_COL].astype(int)
+    return data.sort_values(DATE_COL).reset_index(drop=True)
+
+
+def available_factors(data):
+    """Every column that is not the date, the risk-free rate, or a test portfolio."""
+    excluded = {DATE_COL, RF_COL, *PORTFOLIO_COLS}
+    return [c for c in data.columns if c not in excluded]
+
+
+def parse_month(text):
+    """Parse 'YYYYMM', 'YYYY-MM', or 'YYYY/MM' into an int YYYYMM. Raises ValueError."""
+    digits = text.strip().replace("-", "").replace("/", "")
+    if len(digits) != 6 or not digits.isdigit():
+        raise ValueError(f"'{text}' is not a month in YYYYMM or YYYY-MM format.")
+    month = int(digits[4:])
+    if not 1 <= month <= 12:
+        raise ValueError(f"'{text}' has an invalid month ({month:02d}).")
+    return int(digits)
+
+
+def fmt_month(yyyymm):
+    return f"{yyyymm // 100}-{yyyymm % 100:02d}"
+
+
+def min_obs_required(n_portfolios, n_factors):
+    """GRS needs T - N - K > 0 degrees of freedom, so T >= N + K + 1."""
+    return n_portfolios + n_factors + 1
+
+
+def prompt_date_range(data, max_factors):
+    """Ask for a start and end month and return the rows in that (inclusive) range."""
+    months = data[DATE_COL].tolist()
+    first, last = months[0], months[-1]
+    min_T = min_obs_required(len(PORTFOLIO_COLS), max_factors)
+
+    print(
+        f"\nData covers {fmt_month(first)} to {fmt_month(last)} ({len(months)} months)."
+    )
+    while True:
+        try:
+            start_in = input(f"Start month [YYYYMM, Enter = {first}]: ").strip()
+            end_in = input(f"End month   [YYYYMM, Enter = {last}]: ").strip()
+            start = parse_month(start_in) if start_in else first
+            end = parse_month(end_in) if end_in else last
+
+            if start > end:
+                raise ValueError("Start month must be on or before the end month.")
+            if start < first or end > last:
+                raise ValueError(
+                    f"Range must fall within {fmt_month(first)} to {fmt_month(last)}."
+                )
+            subset = data[(data[DATE_COL] >= start) & (data[DATE_COL] <= end)]
+            if len(subset) < min_T:
+                raise ValueError(
+                    f"Range has {len(subset)} months, but the GRS test with "
+                    f"{len(PORTFOLIO_COLS)} portfolios and up to {max_factors} factor(s) "
+                    f"needs at least {min_T}."
+                )
+            return subset.reset_index(drop=True)
+        except ValueError as err:
+            print(f"  Invalid range: {err} Please try again.\n")
+
+
+def model_name_for(factors):
+    """Readable label for a factor combination."""
+    if factors == ["RMRF"]:
+        return "CAPM"
+    if sorted(factors) == sorted(["RMRF", "SMB", "HML"]):
+        return "Fama-French 3-Factor"
+    return f"{len(factors)}-Factor Model ({', '.join(factors)})"
+
+
+def prompt_factor_models(factor_options):
+    """Ask for one or more factor combinations.
+
+    Factors within a model are separated by spaces or commas; models by ';'.
+    Example: RMRF; RMRF SMB HML; SMB HML
+    """
+    lookup = {f.upper(): f for f in factor_options}
+    default = "RMRF; " + " ".join(
+        f for f in ["RMRF", "SMB", "HML"] if f.upper() in lookup
+    )
+
+    print(f"\nAvailable factors: {', '.join(factor_options)}")
+    print("Enter one or more factor combinations, separating models with ';'")
+    print("  e.g.  RMRF; RMRF SMB HML; SMB HML")
+    while True:
+        raw = input(f"Models [Enter = {default}]: ").strip() or default
+        try:
+            models = []
+            for chunk in raw.split(";"):
+                tokens = chunk.replace(",", " ").split()
+                if not tokens:
+                    continue
+                unknown = [t for t in tokens if t.upper() not in lookup]
+                if unknown:
+                    raise ValueError(f"Unknown factor(s): {', '.join(unknown)}.")
+                factors = list(dict.fromkeys(lookup[t.upper()] for t in tokens))
+                if factors not in models:
+                    models.append(factors)
+            if not models:
+                raise ValueError("Enter at least one factor.")
+            return models
+        except ValueError as err:
+            print(f"  Invalid input: {err} Please try again.\n")
 
 
 # --- Main ---
@@ -266,29 +390,29 @@ def run_model(data, portfolio, factors):
 
 def main():
     """
-    Run the analysis, GRS test, and Fama-Macbeth regressions for CAPM and Fama-French.
-    Organize & export results
+    Prompt for a date range and factor combinations, then run the time-series
+    regressions, GRS test, and Fama-MacBeth regressions for each model.
     """
-    # Load & Prep data
-    data = pd.read_excel(file_path, sheet_name="Data", header=0, nrows=360)
-    # print("Column names:", data.columns.tolist())
-    # print(data.head())
-    portfolio_cols = [f"ME{i} BM{j}" for i in range(1, 6) for j in range(1, 6)]
-    data.columns = data.columns.str.strip()
+    data = load_data()
+    portfolio_cols = PORTFOLIO_COLS
 
-    # Run CAPM
-    capm_results = run_model(data, portfolio_cols, ["RMRF"])
+    factor_models = prompt_factor_models(available_factors(data))
+    max_k = max(len(f) for f in factor_models)
+    sample = prompt_date_range(data, max_k)
 
-    # Run Fama-French 3-factor
-    ff3_results = run_model(data, portfolio_cols, ["RMRF", "SMB", "HML"])
+    print(
+        f"\nSample: {fmt_month(sample[DATE_COL].iloc[0])} to "
+        f"{fmt_month(sample[DATE_COL].iloc[-1])} (T = {len(sample)} months, "
+        f"N = {len(portfolio_cols)} portfolios)"
+    )
 
-    # Organize and display results
+    # Run each requested model
     models = {
-        "CAPM": {"results": capm_results, "factors": ["RMRF"]},
-        "Fama-French 3-Factor": {
-            "results": ff3_results,
-            "factors": ["RMRF", "SMB", "HML"],
-        },
+        model_name_for(factors): {
+            "results": run_model(sample, portfolio_cols, factors),
+            "factors": factors,
+        }
+        for factors in factor_models
     }
 
     output_tables = {}
@@ -324,6 +448,7 @@ def main():
         grs_df = pd.DataFrame(
             {
                 "GRS F-statistic": [results["grs_stat"]],
+                "F-critical (5%)": [results["grs_fcrit"]],
                 "p-value": [results["grs_pvalue"]],
                 "Reject H0 (5%)": [results["grs_pvalue"] < 0.05],
             },
@@ -349,8 +474,8 @@ def main():
         print(factor_summary_df.round(4).to_string())
 
         # Portfolio expected returns
-        print("\nCAPM Portfolio Excess Return Summary:")
-        print(capm_results["portfolio_summary"].round(6))
+        print("\nPortfolio Excess Return Summary:")
+        print(results["portfolio_summary"].round(6))
 
         print("\nTime-Series Regression:")
         print(regression_df.round(4).to_string())
