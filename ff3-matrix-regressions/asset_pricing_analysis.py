@@ -3,7 +3,7 @@ import numpy as np
 import validation as v
 from scipy.stats import f
 
-from reporting import export_results_to_excel
+from reporting import export_results_to_excel, plot_portfolio_returns, plot_sml
 from data_loader import load_data, PORTFOLIO_COLS, DATE_COL, RF_COL
 
 # =====================================
@@ -601,6 +601,23 @@ def main():
             f"{consistency['fm_intercept_t']:.4f}"
         )
 
+    # --- Plots ---
+
+    rawrets = sample[portfolio_cols].to_numpy(dtype=float)
+    rf = sample["RF"].to_numpy(dtype=float).reshape(-1, 1)
+
+    # Calculate excess returns using existing function
+    rets = excess_returns(rawrets, rf)
+
+    # Portfolio excess returns bar chart
+    plot_portfolio_returns(rets, portfolio_cols)
+
+    # SML scatter plot (CAPM only)
+    if "CAPM" in models:
+        betas = models["CAPM"]["results"]["regression"]["beta"]
+        expected_returns = rets.mean(axis=0)
+
+        plot_sml(betas, expected_returns, portfolio_cols)
     # --- Compare Models ---
     comparison_df = pd.concat([output_tables[name]["GRS"] for name in output_tables])
 

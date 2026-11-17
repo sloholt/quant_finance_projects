@@ -1,6 +1,7 @@
 from pathlib import Path
 import numpy as np
 from openpyxl import Workbook
+import matplotlib.pyplot as plt
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
@@ -269,3 +270,60 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
     wb.save(output_path)
 
     print(f"Excel report updated: {output_path.resolve()}")
+
+
+def plot_portfolio_returns(rawrets, portfolio_cols):
+    """
+    Replicate Excel exploratory data analysis chart:
+    Average monthly raw returns for 25 size/BM portfolios.
+    """
+    # Calculate expected returns (equivalent to EXPRET)
+    expected_returns = np.asarray(rawrets.mean(axis=0)).reshape(-1)
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+
+    ax.bar(portfolio_cols, expected_returns, color="#3E6385")
+
+    ax.set_title("Average Monthly Portfolio Returns")
+    ax.set_xlabel("Portfolio")
+    ax.set_ylabel("Average Monthly Return (%)")
+
+    ax.set_xticks(range(len(portfolio_cols)))
+    ax.set_xticklabels(portfolio_cols, rotation=90, fontsize=8)
+
+    ax.set_ylim(bottom=0)
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_axisbelow(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_sml(betas, expected_returns, portfolio_cols):
+    """
+    Plot the Security Market Line (SML) analysis:
+    CAPM betas vs. average monthly portfolio returns.
+    """
+    betas = np.asarray(betas, dtype=float).reshape(-1)
+    expected_returns = np.asarray(expected_returns, dtype=float).reshape(-1)
+
+    if len(betas) != len(expected_returns) or len(betas) != len(portfolio_cols):
+        raise ValueError(
+            "Betas, returns, and portfolio labels must have matching lengths."
+        )
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    # Scatter plot
+    ax.scatter(betas, expected_returns, color="#3E6385", s=60)
+
+    ax.set_title("Security Market Line (SML) Analysis")
+    ax.set_xlabel("Portfolio Beta")
+    ax.set_ylabel("Average Monthly Return (%)")
+
+    ax.set_ylim(bottom=0)
+    ax.grid(True, alpha=0.3)
+    ax.set_axisbelow(True)
+
+    plt.tight_layout()
+    plt.show()
