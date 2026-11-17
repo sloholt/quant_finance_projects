@@ -101,7 +101,7 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
     # -------------------------
     # Portfolio Summary
     # -------------------------
-    ws.cell(row, 1, "PORTFOLIO SUMMARY STATISTICS")
+    ws.cell(row, 1, "PORTFOLIO RAW RETURN SUMMARY STATISTICS")
     ws.cell(row, 1).font = Font(bold=True)
     row += 1
 

@@ -64,19 +64,15 @@ def load_french_data():
         0
     ]
 
+    print("Original French columns:")
+    print(portfolios.columns.tolist())
+
     factors = factors.rename(columns={"Mkt-RF": "RMRF"})
-    # Explicitly map size and book-to-market labels
-    # rather than relying on column position.
-    size_labels = ["SMALL", "ME2", "ME3", "ME4", "BIG"]
-    bm_labels = ["LoBM", "BM2", "BM3", "BM4", "HiBM"]
+    # Confirm 25 portfolios were downloaded
+    if portfolios.shape[1] != 25:
+        raise ValueError(f"Expected 25 portfolios, found {portfolios.shape[1]}")
 
-    expected = [f"{size} {bm}" for size in size_labels for bm in bm_labels]
-
-    missing = [col for col in expected if col not in portfolios.columns]
-    if missing:
-        raise ValueError(f"Unexpected French portfolio columns: {missing}")
-
-    portfolios = portfolios[expected].copy()
+    portfolios = portfolios.copy()
     portfolios.columns = PORTFOLIO_COLS
 
     data = factors.join(portfolios, how="inner")
@@ -91,7 +87,7 @@ def load_french_data():
 
 def load_data(source="french"):
     if source == "french":
-        return load_french_data
+        return load_french_data()
     elif source == "excel":
         return load_excel_data()
     raise ValueError("Invalid data source. Choose French or Excel")

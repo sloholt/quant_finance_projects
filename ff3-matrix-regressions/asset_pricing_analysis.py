@@ -208,7 +208,7 @@ def cross_sectional(gamma):
     return {"avg_gamma": avg_gamma, "se_gamma": se_gamma, "t_gamma": t_stat}
 
 
-def model_consistency_check(factor_means, one_shot, fm_results):
+def model_consistency_checks(factor_means, one_shot, fm_results):
     """
     Compare estimated factor risk premia with factor means
     and evaluate whether pricing intercepts are near zero.
@@ -271,7 +271,8 @@ def run_model(data, portfolio, factors):
         index=factors,
     )
     # Portfolio Excess Return Summary Statistics
-    portfolio_stats = summary_stats(rets)
+    portfolio_stats = summary_stats(rawrets, rfvec=rf)
+    expected_excess_returns = rets.mean(axis=0)
     expected_excess_returns = portfolio_stats["mean"]
 
     portfolio_summary_df = pd.DataFrame(
@@ -543,7 +544,7 @@ def main():
         print(factor_summary_df.round(4).to_string())
 
         # Portfolio expected returns
-        print("\nPortfolio Excess Return Summary:")
+        print("\nPortfolio Raw Return Summary:")
         print(results["portfolio_summary"].round(6))
 
         print("\nTime-Series Regression:")
