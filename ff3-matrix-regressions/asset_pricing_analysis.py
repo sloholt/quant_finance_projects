@@ -175,9 +175,13 @@ def fgrs_hypothesis(fgrs, f_critical, model_name):
 
 
 # --- Cross Sectional One Shot ---
+
+
 def one_shot_cross_sectional(avg_rets, betas):
     y = np.asarray(avg_rets, dtype=float).reshape(-1)
     X = add_constant(betas.T)  # (N, K+1)
+
+    N, P = X.shape  # N portfolios, P estimated coefficients
 
     # Cross-sectional OLS
     gamma = np.linalg.lstsq(X, y, rcond=None)[0]
@@ -191,8 +195,26 @@ def one_shot_cross_sectional(avg_rets, betas):
     ss_tot = np.sum((y - y.mean()) ** 2)
     r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
+    # OLS standard errors
+    if N <= P:
+        raise ValueError("Insufficient portfolios for OLS standard errors.")
+
+    v.check_matrix_condition(X.T @ X)
+
+    sigma2 = ss_res / (N - P)
+    cov_gamma = sigma2 * np.linalg.inv(X.T @ X)
+
+    se_gamma = np.sqrt(np.diag(cov_gamma))
+
+    # t-statistics
+    t_gamma = np.divide(
+        gamma, se_gamma, out=np.full_like(gamma, np.nan), where=se_gamma > 0
+    )
+
     return {
         "gamma": gamma,
+        "se_gamma": se_gamma,
+        "t_gamma": t_gamma,
         "fitted": fitted,
         "residuals": residuals,
         "r_squared": r_squared,
@@ -270,14 +292,13 @@ def run_model(data, portfolio, factors):
         },
         index=factors,
     )
-    # Portfolio Excess Return Summary Statistics
     portfolio_stats = summary_stats(rawrets, rfvec=rf)
     expected_excess_returns = rets.mean(axis=0)
-    expected_excess_returns = portfolio_stats["mean"]
+    # expected_excess_returns = portfolio_stats["mean"]
 
     portfolio_summary_df = pd.DataFrame(
         {
-            "Mean": expected_excess_returns,
+            "Mean": portfolio_stats["mean"],
             "Variance": portfolio_stats["var"],
             "Std Dev": portfolio_stats["std"],
             "Sharpe Ratio": portfolio_stats["sr"],
@@ -509,7 +530,12 @@ def main():
         )
         # One-shot cross-sectional results
         one_shot_df = pd.DataFrame(
-            {"Gamma": one_shot["gamma"]}, index=["Intercept"] + factors
+            {
+                "Gamma": one_shot["gamma"],
+                "SE Gamma": one_shot["se_gamma"],
+                "t Gamma": one_shot["t_gamma"],
+            },
+            index=["Intercept"] + factors,
         )
         # Factor risk premium consistency
         consistency_df = pd.DataFrame(
@@ -553,12 +579,12 @@ def main():
         print("\nGRS Joint Alpha Test:")
         print(grs_df.round(4).to_string())
 
-        print("\nFama-MacBeth Cross-Sectional Regression:")
-        print(fm_df.round(4).to_string())
-
         print("\nOne-Shot Cross-Sectional Regression:")
         print(one_shot_df.round(4).to_string())
         print(f"Cross-sectional R²: {one_shot['r_squared']:.4f}")
+
+        print("\nFama-MacBeth Cross-Sectional Regression:")
+        print(fm_df.round(4).to_string())
 
         # Model consistency
         print("\nModel Consistency Checks:")
