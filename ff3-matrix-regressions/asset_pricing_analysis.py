@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import validation as v
 
 from scipy import stats
 from scipy.stats import f, linregress
@@ -268,6 +269,84 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
         ws.cell(row, 2, value)
         row += 1
 
+    # -------------------------
+    # One-Shot Cross-Sectional Regression
+    # -------------------------
+    row += 2
+
+    ws.cell(row, 1, "ONE-SHOT CROSS-SECTIONAL REGRESSION")
+    ws.cell(row, 1).font = Font(bold=True)
+    row += 1
+
+    one_shot = model_results["one_shot"]
+
+    # Intercept and factor risk premia
+    gamma_labels = ["Intercept"] + factors
+
+    for label, value in zip(gamma_labels, one_shot["gamma"]):
+        ws.cell(row, 1, f"Gamma_{label}")
+        ws.cell(row, 2, float(value))
+        row += 1
+
+    # Model R-squared
+    ws.cell(row, 1, "Cross-Sectional R²")
+    ws.cell(row, 2, float(one_shot["r_squared"]))
+    row += 2
+
+    # Portfolio-level fitted returns and pricing errors
+    ws.cell(row, 1, "FITTED RETURNS AND PRICING ERRORS")
+    ws.cell(row, 1).font = Font(bold=True)
+    row += 1
+
+    for metric, values in {
+        "Fitted Excess Return": one_shot["fitted"],
+        "Pricing Error (Residual)": one_shot["residuals"],
+    }.items():
+        ws.cell(row, 1, metric)
+
+        for i, value in enumerate(values):
+            ws.cell(row, i + 2, float(value))
+
+        row += 1
+
+        # -------------------------
+    # Model Consistency Checks
+    # -------------------------
+    row += 2
+
+    ws.cell(row, 1, "MODEL CONSISTENCY CHECKS")
+    ws.cell(row, 1).font = Font(bold=True)
+    row += 1
+
+    consistency = model_results["consistency"]
+
+    for i, factor in enumerate(factors):
+        metrics = {
+            f"{factor} Factor Mean": consistency["factor_means"][i],
+            f"{factor} One-Shot Gamma": consistency["one_shot_premia"][i],
+            f"{factor} One-Shot Difference": consistency["one_shot_diff"][i],
+            f"{factor} FM Gamma": consistency["fm_premia"][i],
+            f"{factor} FM Difference": consistency["fm_diff"][i],
+        }
+
+        for label, value in metrics.items():
+            ws.cell(row, 1, label)
+            ws.cell(row, 2, float(value))
+            row += 1
+
+    row += 1
+
+    intercept_metrics = {
+        "One-Shot Pricing Intercept": consistency["one_shot_intercept"],
+        "FM Pricing Intercept": consistency["fm_intercept"],
+        "FM Intercept t-statistic": consistency["fm_intercept_t"],
+    }
+
+    for label, value in intercept_metrics.items():
+        ws.cell(row, 1, label)
+        ws.cell(row, 2, float(value))
+        row += 1
+
     # Format and save
     format_workbook(ws)
     wb.save(output_path)
@@ -296,6 +375,7 @@ def time_series_regression(R, F):
 
     # Estimate OLS coefficients
     B = np.linalg.lstsq(X, R, rcond=None)[0]
+    v.check_matrix_condition(X.T @ X)
     XtX_inv = np.linalg.inv(X.T @ X)
 
     E = R - X @ B
@@ -353,6 +433,9 @@ def grs_test(T, N, num_factors, alphas, factors, residcovmat):
     factor_means = factors.mean(axis=0).reshape(-1, 1)
     factor_covmat = np.atleast_2d(np.cov(factors, rowvar=False, ddof=0))
 
+    v.check_matrix_condition(residcovmat)
+    v.check_matrix_condition(factor_covmat)
+
     first_term = ((T - N - num_factors)) / N * (T / (T - num_factors - 1))
     numerator = (alphas.T @ np.linalg.solve(residcovmat, alphas)).item()
     denominator = (
@@ -377,6 +460,30 @@ def fgrs_hypothesis(fgrs, f_critical, model_name):
 
 
 # --- Cross Sectional One Shot ---
+def one_shot_cross_sectional(avg_rets, betas):
+    y = np.asarray(avg_rets, dtype=float).reshape(-1)
+    X = add_constant(betas.T)  # (N, K+1)
+
+    # Cross-sectional OLS
+    gamma = np.linalg.lstsq(X, y, rcond=None)[0]
+
+    # Fitted returns and residuals
+    fitted = X @ gamma
+    residuals = y - fitted
+
+    # Cross-sectional R-squared
+    ss_res = np.sum(residuals**2)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
+
+    return {
+        "gamma": gamma,
+        "fitted": fitted,
+        "residuals": residuals,
+        "r_squared": r_squared,
+    }
+
+
 def cross_sectional(gamma):
     gamma = as_2d(gamma)
     T = gamma.shape[0]
@@ -384,6 +491,28 @@ def cross_sectional(gamma):
     se_gamma = gamma.std(axis=0, ddof=1) / np.sqrt(T)
     t_stat = (avg_gamma - 0) / se_gamma
     return {"avg_gamma": avg_gamma, "se_gamma": se_gamma, "t_gamma": t_stat}
+
+
+def model_consistency_check(factor_means, one_shot, fm_results):
+    """
+    Compare estimated factor risk premia with factor means
+    and evaluate whether pricing intercepts are near zero.
+    """
+    factor_means = np.asarray(factor_means, dtype=float)
+
+    one_shot_gamma = np.asarray(one_shot["gamma"])
+    fm_gamma = np.asarray(fm_results["avg_gamma"])
+
+    return {
+        "factor_means": factor_means,
+        "one_shot_premia": one_shot_gamma[1:],
+        "fm_premia": fm_gamma[1:],
+        "one_shot_diff": one_shot_gamma[1:] - factor_means,
+        "fm_diff": fm_gamma[1:] - factor_means,
+        "one_shot_intercept": one_shot_gamma[0],
+        "fm_intercept": fm_gamma[0],
+        "fm_intercept_t": fm_results["t_gamma"][0],
+    }
 
 
 # =====================================
@@ -398,6 +527,14 @@ factors given as input"""
 
 def run_model(data, portfolio, factors):
     """Run asset pricing analysis for selected factors"""
+
+    # Validate required columns
+    required_columns = [DATE_COL, RF_COL] + portfolio + factors
+    v.validate_data_schema(data, required_columns)
+
+    # Validate missing values in selected columns
+    v.validate_missing_values(data[required_columns])
+
     F = data[factors].to_numpy(dtype=float)
     rf = data["RF"].to_numpy(dtype=float)
     rawrets = data[portfolio].to_numpy(dtype=float)
@@ -405,6 +542,7 @@ def run_model(data, portfolio, factors):
     rets = excess_returns(rawrets, rf)
     T, N = rawrets.shape
     num_factors = F.shape[1]
+    v.validate_sample_size(T, N, K=num_factors)
 
     # Factor Summary Statistics
     factor_stats = summary_stats(F, rfvec=rf)
@@ -446,6 +584,13 @@ def run_model(data, portfolio, factors):
     gamma = get_gamma(rets, betas)
     fm_results = cross_sectional(gamma)
 
+    # One-shot cross-sectional regression
+    one_shot_results = one_shot_cross_sectional(expected_excess_returns, betas)
+    # Model consistency checks
+    consistency_results = model_consistency_checks(
+        factor_stats["mean"], one_shot_results, fm_results
+    )
+
     model_results = {
         "factor_summary": factor_summary_df,
         "portfolio_summary": portfolio_summary_df,
@@ -457,6 +602,8 @@ def run_model(data, portfolio, factors):
         "grs_fcrit": f_crit,
         "fama_macbeth": fm_results,
         "residual_covariance": RESIDCOVMAT,
+        "one_shot": one_shot_results,
+        "consistency": consistency_results,
     }
     export_results_to_excel(
         model_results=model_results, factors=factors, portfolio=portfolio
@@ -478,8 +625,19 @@ def load_data():
     """Load the full data sheet, clean column names, and sort by month."""
     data = pd.read_excel(file_path, sheet_name="Data", header=0)
     data.columns = data.columns.str.strip()
+
+    # Validate required columns
+    required_columns = [DATE_COL, RF_COL] + PORTFOLIO_COLS
+    v.validate_data_schema(data, required_columns)
+
     data = data.dropna(subset=[DATE_COL]).copy()
-    data[DATE_COL] = data[DATE_COL].astype(int)
+    data[DATE_COL] = data[DATE_COL].apply(
+        lambda x: (
+            v.validate_date(str(int(x)))
+            if isinstance(x, (int, float, np.integer, np.floating))
+            else v.validate_date(str(x))
+        )
+    )
     return data.sort_values(DATE_COL).reset_index(drop=True)
 
 
@@ -489,18 +647,7 @@ def available_factors(data):
     return [c for c in data.columns if c not in excluded]
 
 
-def parse_month(text):
-    """Parse 'YYYYMM', 'YYYY-MM', or 'YYYY/MM' into an int YYYYMM. Raises ValueError."""
-    digits = text.strip().replace("-", "").replace("/", "")
-    if len(digits) != 6 or not digits.isdigit():
-        raise ValueError(f"'{text}' is not a month in YYYYMM or YYYY-MM format.")
-    month = int(digits[4:])
-    if not 1 <= month <= 12:
-        raise ValueError(f"'{text}' has an invalid month ({month:02d}).")
-    return int(digits)
-
-
-def fmt_month(yyyymm):
+def fmt_month(yyyymm):  # Month formatting
     return f"{yyyymm // 100}-{yyyymm % 100:02d}"
 
 
@@ -511,36 +658,48 @@ def min_obs_required(n_portfolios, n_factors):
 
 def prompt_date_range(data, max_factors):
     """Ask for a start and end month and return the rows in that (inclusive) range."""
+
     months = data[DATE_COL].tolist()
-    first, last = months[0], months[-1]
-    min_T = min_obs_required(len(PORTFOLIO_COLS), max_factors)
+    first, last = min(months), max(months)
+
+    N = len(PORTFOLIO_COLS)
+    K = max_factors
 
     print(
-        f"\nData covers {fmt_month(first)} to {fmt_month(last)} ({len(months)} months)."
+        f"\nData covers {fmt_month(first)} to {fmt_month(last)} "
+        f"({len(months)} observations)."
     )
+
     while True:
         try:
+            # Get user input
             start_in = input(f"Start month [YYYYMM, Enter = {first}]: ").strip()
             end_in = input(f"End month   [YYYYMM, Enter = {last}]: ").strip()
-            start = parse_month(start_in) if start_in else first
-            end = parse_month(end_in) if end_in else last
 
-            if start > end:
-                raise ValueError("Start month must be on or before the end month.")
-            if start < first or end > last:
-                raise ValueError(
-                    f"Range must fall within {fmt_month(first)} to {fmt_month(last)}."
-                )
+            # Validate individual dates
+            start = v.validate_date(start_in) if start_in else first
+            end = v.validate_date(end_in) if end_in else last
+
+            # Validate date ordering and minimum calendar window
+            v.validate_date_range(start, end, N=N, K=K)
+
+            # Validate dates against available dataset
+            v.validate_data_range(start, end, months)
+
+            # Filter data to selected window
             subset = data[(data[DATE_COL] >= start) & (data[DATE_COL] <= end)]
-            if len(subset) < min_T:
-                raise ValueError(
-                    f"Range has {len(subset)} months, but the GRS test with "
-                    f"{len(PORTFOLIO_COLS)} portfolios and up to {max_factors} factor(s) "
-                    f"needs at least {min_T}."
-                )
+
+            # Validate actual sample size
+            v.validate_sample_size(len(subset), N, K)
+
             return subset.reset_index(drop=True)
+
         except ValueError as err:
-            print(f"  Invalid range: {err} Please try again.\n")
+            print(f"Invalid range: {err} Please try again.\n")
+
+        except (KeyboardInterrupt, EOFError):
+            print("\nInput cancelled. Exiting.")
+            raise SystemExit(0)
 
 
 def model_name_for(factors):
@@ -574,10 +733,7 @@ def prompt_factor_models(factor_options):
                 tokens = chunk.replace(",", " ").split()
                 if not tokens:
                     continue
-                unknown = [t for t in tokens if t.upper() not in lookup]
-                if unknown:
-                    raise ValueError(f"Unknown factor(s): {', '.join(unknown)}.")
-                factors = list(dict.fromkeys(lookup[t.upper()] for t in tokens))
+                factors = v.validate_factors(tokens, factor_options)
                 if factors not in models:
                     models.append(factors)
             if not models:
@@ -625,6 +781,8 @@ def main():
         factors = model["factors"]
         regression = results["regression"]
         fm = results["fama_macbeth"]
+        one_shot = results["one_shot"]
+        consistency = results["consistency"]
 
         # Time-series regression results
         regression_df = pd.DataFrame(
@@ -657,6 +815,21 @@ def main():
             },
             index=[model_name],
         )
+        # One-shot cross-sectional results
+        one_shot_df = pd.DataFrame(
+            {"Gamma": one_shot["gamma"]}, index=["Intercept"] + factors
+        )
+        # Factor risk premium consistency
+        consistency_df = pd.DataFrame(
+            {
+                "Factor Mean": consistency["factor_means"],
+                "One-Shot Gamma": consistency["one_shot_premia"],
+                "One-Shot Difference": consistency["one_shot_diff"],
+                "FM Gamma": consistency["fm_premia"],
+                "FM Difference": consistency["fm_diff"],
+            },
+            index=factors,
+        )
 
         factor_summary_df = results["factor_summary"]
 
@@ -665,6 +838,8 @@ def main():
             "Regression": regression_df,
             "GRS": grs_df,
             "Fama-MacBeth": fm_df,
+            "One-Shot Cross-Sectional": one_shot_df,
+            "Consistency": consistency_df,
         }
 
         # --- Display Results ---
@@ -688,6 +863,25 @@ def main():
 
         print("\nFama-MacBeth Cross-Sectional Regression:")
         print(fm_df.round(4).to_string())
+
+        print("\nOne-Shot Cross-Sectional Regression:")
+        print(one_shot_df.round(4).to_string())
+        print(f"Cross-sectional R²: {one_shot['r_squared']:.4f}")
+
+        # Model consistency
+        print("\nModel Consistency Checks:")
+        print(consistency_df.round(4).to_string())
+
+        print(
+            f"\nOne-Shot Pricing Intercept: " f"{consistency['one_shot_intercept']:.6f}"
+        )
+
+        print(f"Fama-MacBeth Pricing Intercept: " f"{consistency['fm_intercept']:.6f}")
+
+        print(
+            f"Fama-MacBeth Intercept t-statistic: "
+            f"{consistency['fm_intercept_t']:.4f}"
+        )
 
     # --- Compare Models ---
     comparison_df = pd.concat([output_tables[name]["GRS"] for name in output_tables])
