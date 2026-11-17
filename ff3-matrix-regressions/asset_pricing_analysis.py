@@ -627,6 +627,8 @@ def main():
     print(comparison_df.round(4).to_string())
 
 
+main()
+
 if __name__ == "__main__":
     main()
 

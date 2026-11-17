@@ -2,66 +2,65 @@
 
 Run:  python dashboard.py   then open http://127.0.0.1:8050
 
-All estimation is done by asset_pricing_analysis.run_model, so the numbers here
-match the command-line script for the same date range and factors.
+Data comes from data_loader.load_data (Kenneth French's library by default).
+Set the environment variable DATA_SOURCE=excel to use the class Excel file instead.
+
+Inputs are checked with the same validation module the command-line script uses, and
+all estimation is done by asset_pricing_analysis.run_model, so the numbers here match
+the script for the same date range and factors. Note that run_model also writes the
+Excel report to results/ on every run.
 """
 
 import calendar
+import os
+import re
+import warnings
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
+from dash import Dash, ALL, Input, Output, State, ctx, dcc, html, no_update
 
-from asset_pricing_analysis import (
-    DATE_COL,
-    PORTFOLIO_COLS,
-    available_factors,
-    load_data,
-    min_obs_required,
-    run_model,
-)
+import validation as v
+from asset_pricing_analysis import available_factors, run_model
+from data_loader import DATE_COL, PORTFOLIO_COLS, RF_COL, load_data
 
 # =====================================
 # DATA & CONSTANTS
 # =====================================
 
-DATA = load_data()
+DATA_SOURCE = os.environ.get("DATA_SOURCE", "french").strip().lower()
+DATA = load_data(DATA_SOURCE)
 FACTORS = available_factors(DATA)
-FIRST, LAST = int(DATA[DATE_COL].iloc[0]), int(DATA[DATE_COL].iloc[-1])
+FIRST, LAST = int(DATA[DATE_COL].min()), int(DATA[DATE_COL].max())
 YEARS = list(range(FIRST // 100, LAST // 100 + 1))
 FF3 = ["RMRF", "SMB", "HML"]
 N_PORT = len(PORTFOLIO_COLS)
 T_CRIT = 1.96
+LOW_POWER_MONTHS = 60  # validation.validate_sample_size warns below this
 SUBSCRIPT = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
-# Labels used in chips (setup panel) and in tables / charts
+# Labels used in chips (setup panel)
 CHIP_LABELS = {"RMRF": "Market excess return", "SMB": "Size (SMB)", "HML": "Value (HML)"}
 CHIP_WIDTHS = {"RMRF": "183px", "SMB": "109px", "HML": "117px"}  # chip widths in the Figma frame
-FACTOR_LABELS = {"RMRF": "Market (RMRF)", "SMB": "Size (SMB)", "HML": "Value (HML)"}
+BETA_SUB = {"RMRF": "ₘ", "SMB": "ₛ", "HML": "ₕ"}
 
 # Design tokens (mirrors assets/dashboard.css)
-INK, MUTED, GREEN, RED = "#182b36", "#62727e", "#087f67", "#b3412f"
-SCALE_NEG, SCALE_MID, SCALE_POS = (61, 100, 176), (243, 245, 247), (196, 97, 43)
-CAPM_COLOR, OTHER_COLORS = "#6b87bf", ["#087f67", "#c4612b", "#8a6bbf"]
-
-
-def model_colors(models):
-    """CAPM is always blue; other models take green, then the remaining colors."""
-    others = iter(OTHER_COLORS)
-    return [CAPM_COLOR if m["name"] == "CAPM" else next(others) for m in models]
+INK, MUTED, BAR = "#182b36", "#62727e", "#3e6385"
+GRID, AXIS = "#edf0f3", "#cfd8de"
 
 
 def chip_label(f):
     return CHIP_LABELS.get(f, f)
 
 
-def factor_label(f):
-    return FACTOR_LABELS.get(f, f)
-
-
 def factor_phrase(f):
     """Factor name as used mid-sentence, e.g. 'value (HML)'."""
     return {"RMRF": "the market (RMRF)", "SMB": "size (SMB)", "HML": "value (HML)"}.get(f, f)
+
+
+def tidy(err):
+    """Validation messages are built from concatenated sentences; add the missing spaces."""
+    return re.sub(r"([.)])(?=[A-Z])", r" ", str(err)).strip()
 
 
 def yyyymm(year, month):
@@ -70,6 +69,10 @@ def yyyymm(year, month):
 
 def month_label(ym):
     return f"{calendar.month_abbr[ym % 100]} {ym // 100}"
+
+
+def plural(n, word):
+    return f"{n} {word}{'' if n == 1 else 's'}"
 
 
 # =====================================
@@ -88,8 +91,7 @@ def factor_model_name(factors):
 def factor_model_desc(factors):
     if sorted(factors) == sorted(FF3):
         return "Three-factor model"
-    n = len(factors)
-    return f"{n}-factor model · {' · '.join(factors)}"
+    return f"{len(factors)}-factor model · {' · '.join(factors)}"
 
 
 def requested_models(models, factors):
@@ -102,23 +104,44 @@ def requested_models(models, factors):
     return out
 
 
+# =====================================
+# INPUT VALIDATION (validation.py)
+# =====================================
+
+
 def validate(sy, sm, ey, em, factors, models):
-    """Return (sample_df or None, message, is_error)."""
-    start, end = yyyymm(sy, sm), yyyymm(ey, em)
-    if start > end:
-        return None, "Start date must be on or before the end date.", True
-    if start < FIRST or end > LAST:
-        return None, f"Data runs {month_label(FIRST)} – {month_label(LAST)}.", True
-    sample = DATA[(DATA[DATE_COL] >= start) & (DATA[DATE_COL] <= end)]
-    T = len(sample)
-    specs = requested_models(models, factors)
-    if not specs:
-        return None, f"{T} monthly observations · select at least one model.", True
-    k = max(len(f) for _, f in specs)
-    need = min_obs_required(N_PORT, k)
-    if T < need:
-        return None, f"{T} monthly observations · GRS needs at least {need}.", True
-    return sample.reset_index(drop=True), f"{T} monthly observations", False
+    """Run the script's validation checks on the setup inputs.
+
+    Returns (sample_df or None, specs, message, level) where level is
+    "ok", "warn" (valid but < 60 months, low GRS power) or "error".
+    """
+    try:
+        if None in (sy, sm, ey, em):
+            raise ValueError("Choose a start and end month.")
+        start = v.validate_date(f"{int(sy):04d}{int(sm):02d}")
+        end = v.validate_date(f"{int(ey):04d}{int(em):02d}")
+
+        specs = requested_models(models, factors)
+        if not specs:
+            raise ValueError("Select at least one model.")
+        specs = [(name, v.validate_factors(fs, FACTORS)) for name, fs in specs]
+        k = max(len(fs) for _, fs in specs)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            v.validate_date_range(start, end, N=N_PORT, K=k)
+            v.validate_data_range(start, end, DATA[DATE_COL])
+            sample = DATA[(DATA[DATE_COL] >= start) & (DATA[DATE_COL] <= end)]
+            T = len(sample)
+            v.validate_sample_size(T, N_PORT, k)
+    except ValueError as err:
+        return None, [], tidy(err), "error"
+
+    msg = f"{T} monthly observations"
+    if any(issubclass(w.category, UserWarning) for w in caught):
+        return (sample.reset_index(drop=True), specs,
+                f"{msg} · under {LOW_POWER_MONTHS}, so the GRS test has low power", "warn")
+    return sample.reset_index(drop=True), specs, msg, "ok"
 
 
 # =====================================
@@ -126,55 +149,74 @@ def validate(sy, sm, ey, em, factors, models):
 # =====================================
 
 
+def _list(x):
+    return np.asarray(x, dtype=float).tolist()
+
+
 def analyse(sample, specs):
     """Run every requested model and return a JSON-serialisable result bundle."""
     T = len(sample)
     models = []
-    summary = {}
+    portfolio_summary = None
+
     for name, factors in specs:
         res = run_model(sample, PORTFOLIO_COLS, factors)
-        # Factor summary straight from the script (same sample => same stats per factor)
-        for f, row in res["factor_summary"].iterrows():
-            summary[f] = {
-                "mean": float(row["Mean"]),
-                "var": float(row["Variance"]),
-                "std": float(row["Std Dev"]),
-                "sharpe": float(row["Sharpe Ratio"]),
+        reg, fm, os_, cons = res["regression"], res["fama_macbeth"], res["one_shot"], res["consistency"]
+        alpha, t_alpha = np.asarray(reg["alpha"]), np.asarray(reg["t_alpha"])
+        terms = ["Intercept"] + factors
+
+        if portfolio_summary is None:  # identical for every model on the same sample
+            ps = res["portfolio_summary"]
+            portfolio_summary = {
+                col: _list(ps[src]) for col, src in
+                [("mean", "Mean"), ("var", "Variance"), ("std", "Std Dev"), ("sharpe", "Sharpe Ratio")]
             }
-        reg, fm = res["regression"], res["fama_macbeth"]
-        alpha, t_alpha = reg["alpha"], reg["t_alpha"]
+
         models.append(
             {
                 "name": name,
                 "factors": factors,
-                "alpha": alpha.tolist(),
-                "t_alpha": t_alpha.tolist(),
-                "beta": np.asarray(reg["beta"]).tolist(),
-                "t_beta": np.asarray(reg["t_beta"]).tolist(),
+                "factor_summary": {
+                    f: {"mean": float(r["Mean"]), "var": float(r["Variance"]),
+                        "std": float(r["Std Dev"]), "sharpe": float(r["Sharpe Ratio"])}
+                    for f, r in res["factor_summary"].iterrows()
+                },
+                "alpha": _list(alpha),
+                "t_alpha": _list(t_alpha),
+                "beta": _list(reg["beta"]),
+                "t_beta": _list(reg["t_beta"]),
                 "grs": float(res["grs_stat"]),
                 "p": float(res["grs_pvalue"]),
                 "fcrit": float(res["grs_fcrit"]),
                 "df": [N_PORT, T - N_PORT - len(factors)],
                 "n_sig": int((np.abs(t_alpha) > T_CRIT).sum()),
                 "mean_abs_alpha": float(np.abs(alpha).mean()),
-                "fm": {
-                    "terms": ["Intercept"] + factors,
-                    "avg": np.asarray(fm["avg_gamma"]).tolist(),
-                    "se": np.asarray(fm["se_gamma"]).tolist(),
-                    "t": np.asarray(fm["t_gamma"]).tolist(),
+                "one_shot": {"terms": terms, "gamma": _list(os_["gamma"]), "se": _list(os_["se_gamma"]),
+                             "t": _list(os_["t_gamma"]), "r2": float(os_["r_squared"])},
+                "fm": {"terms": terms, "gamma": _list(fm["avg_gamma"]), "se": _list(fm["se_gamma"]),
+                       "t": _list(fm["t_gamma"])},
+                "consistency": {
+                    "factor_means": _list(cons["factor_means"]),
+                    "os_premia": _list(cons["one_shot_premia"]),
+                    "os_diff": _list(cons["one_shot_diff"]),
+                    "fm_premia": _list(cons["fm_premia"]),
+                    "fm_diff": _list(cons["fm_diff"]),
+                    "os_intercept": float(cons["one_shot_intercept"]),
+                    "fm_intercept": float(cons["fm_intercept"]),
+                    "fm_intercept_t": float(cons["fm_intercept_t"]),
                 },
             }
         )
 
-    used = list(dict.fromkeys(f for _, fs in specs for f in fs))
-    summary = {f: summary[f] for f in used}
+    excess = sample[PORTFOLIO_COLS].to_numpy(float) - sample[[RF_COL]].to_numpy(float)
     return {
         "start": int(sample[DATE_COL].iloc[0]),
         "end": int(sample[DATE_COL].iloc[-1]),
         "T": T,
-        "factors": used,
+        "factors": list(dict.fromkeys(f for _, fs in specs for f in fs)),
         "models": models,
-        "summary": summary,
+        "portfolio_summary": portfolio_summary,
+        "avg_excess": _list(excess.mean(axis=0)),
     }
 
 
@@ -191,13 +233,12 @@ def fmt_p(p):
     return "<0.001" if p < 0.001 else f"{p:.3f}"
 
 
-def fmt_num(x, digits=2):
-    s = f"{x:+.{digits}f}" if digits else f"{x:+.0f}"
-    return s.replace("-", "−")
-
-
-def fmt_plain(x, digits=2):
+def fmt_plain(x, digits=4):
     return f"{x:.{digits}f}".replace("-", "−")
+
+
+def is_sig(t):
+    return abs(t) > T_CRIT
 
 
 def metric(label, value, sub, value_cls=""):
@@ -221,7 +262,7 @@ def verdict_card(m):
                     html.Div(
                         [
                             html.Span(m["name"], className="verdict-name"),
-                            chip(f"{k} factor{'s' if k > 1 else ''} · {' '.join(m['factors'])}"),
+                            chip(f"{plural(k, 'factor')} · {' '.join(m['factors'])}"),
                         ],
                         className="verdict-model",
                     ),
@@ -236,13 +277,9 @@ def verdict_card(m):
             html.Div(
                 [
                     metric("GRS F-stat", f"{m['grs']:.2f}", f"F({m['df'][0]}, {m['df'][1]})"),
-                    metric("F Critical-Value", f"{m['fcrit']:.2f}", "5% level"),
-                    metric(
-                        "p-value",
-                        fmt_p(m["p"]),
-                        "vs. 5% threshold",
-                        "text-red" if reject else "text-green",
-                    ),
+                    metric("p-value", fmt_p(m["p"]), "vs. 5% threshold",
+                           "text-red" if reject else "text-green"),
+                    metric("Significant α", f"{m['n_sig']} of {N_PORT}", f"|t| > {T_CRIT}"),
                     metric("Mean |α|", f"{m['mean_abs_alpha']:.2f}%", "per month"),
                 ],
                 className="metrics",
@@ -285,304 +322,266 @@ def takeaway_text(models):
         grs = f"The GRS test rejects {b['name']} at 5% but not {a['name']}."
     else:
         grs = "The GRS test rejects neither model at 5%."
-    return (
-        f"{lead} {change} average mispricing from {a_abs:.2f}% to {b_abs:.2f}% a month. {grs}"
-    )
+    return f"{lead} {change} average mispricing from {a_abs:.2f}% to {b_abs:.2f}% a month. {grs}"
 
 
-# --- Alpha heatmap ---
+# --- Detail cards & tables ---
 
 
-def cell_color(v, scale):
-    t = max(-1.0, min(1.0, v / scale))
-    end = SCALE_NEG if t < 0 else SCALE_POS
-    rgb = [round(m + abs(t) * (e - m)) for m, e in zip(SCALE_MID, end)]
-    return "#{:02x}{:02x}{:02x}".format(*rgb), abs(t) >= 0.7
+def model_subtitle(m, suffix):
+    """e.g. 'Fama–French 3 factors' / 'Fama–French 3-factor model'."""
+    k = len(m["factors"])
+    if suffix == "model":
+        return f"{m['name']} {k}-factor model"
+    return f"{m['name']} {plural(k, 'factor')}"
 
 
-def heatmap_grid(m, scale):
-    alpha = np.asarray(m["alpha"]).reshape(5, 5)
-    tstat = np.asarray(m["t_alpha"]).reshape(5, 5)
-    col_labels = ["Low", "2", "3", "4", "High"]
-    row_labels = ["Small", "2", "3", "4", "Big"]
-
-    rows = [
-        html.Div(
-            [html.Div(className="hm-spacer-axis"), html.Span("Book-to-market  →   Growth … Value")],
-            className="hm-axis",
-        ),
-        html.Div(
-            [html.Div(className="hm-rowlabel")]
-            + [html.Div(c, className="hm-collabel") for c in col_labels],
-            className="hm-row",
-        ),
+def detail_card(title, subtitle, body, footer=None, cls=""):
+    children = [
+        html.Div([html.Div(title, className="dc-title"), html.Div(subtitle, className="dc-sub")],
+                 className="dc-header"),
+        body,
     ]
-    for i, rl in enumerate(row_labels):
-        cells = []
-        for j in range(5):
-            v, t = alpha[i, j], tstat[i, j]
-            bg, light = cell_color(v, scale)
-            cls = "hm-cell" + (" sig" if abs(t) > T_CRIT else "") + (" light" if light else "")
-            cells.append(
-                html.Div(
-                    fmt_num(v),
-                    className=cls,
-                    style={"backgroundColor": bg},
-                    title=f"{PORTFOLIO_COLS[i * 5 + j]}: α = {v:.3f}%, t = {t:.2f}",
-                )
-            )
-        rows.append(html.Div([html.Div(rl, className="hm-rowlabel")] + cells, className="hm-row"))
-    rows.append(html.Div("↑ Size: Small → Big (rows)", className="hm-axis"))
-
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.Span(m["name"], className="hm-title"),
-                    html.Span(f"{m['n_sig']} of {N_PORT} significant", className="muted-11"),
-                ],
-                className="hm-label",
-            ),
-            html.Div(rows, className="hm-grid"),
-        ],
-        className="hm-block",
-    )
+    if footer:
+        children.append(html.Div(footer, className="dc-foot"))
+    return html.Div(children, className=f"card dcard {cls}".strip())
 
 
-def heatmap_card(models):
-    max_abs = max(np.abs(m["alpha"]).max() for m in models)
-    scale = max(0.1, np.ceil(max_abs * 10) / 10)
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.Div(
-                        [
-                            html.Div("Where does each model misprice?", className="card-title"),
-                            html.Div(
-                                "Time-series alpha by portfolio, % per month · "
-                                "25 size × book-to-market portfolios",
-                                className="muted-11",
-                            ),
-                        ],
-                        className="titles",
-                    ),
-                    html.Div(
-                        [
-                            html.Div(
-                                [
-                                    html.Span(f"−{scale:.1f}%", className="muted-10"),
-                                    html.Div(className="scale-bar"),
-                                    html.Span(f"+{scale:.1f}%", className="muted-10"),
-                                ],
-                                className="legend-row",
-                            ),
-                            html.Div(
-                                [
-                                    html.Div(className="sig-key"),
-                                    html.Span(
-                                        "Outlined = significant (|t| > 1.96)", className="muted-10"
-                                    ),
-                                ],
-                                className="legend-row",
-                            ),
-                        ],
-                        className="hm-legend",
-                    ),
-                ],
-                className="heading-row",
-            ),
-            html.Div([heatmap_grid(m, scale) for m in models], className="hm-wrap"),
-        ],
-        className="card section",
-    )
+def cell(value, cls=""):
+    """A table cell: plain text, or (text, extra_class) for highlighted values."""
+    if isinstance(value, tuple):
+        value, extra = value
+        cls = f"{cls} {extra}"
+    return html.Div(value, className=f"t-cell {cls}".strip())
 
 
-# --- Fama-MacBeth risk premia chart ---
-
-
-def premia_figure(models):
-    terms = ["Intercept"] + list(dict.fromkeys(f for m in models for f in m["factors"]))
-    labels = ["Intercept γ₀" if t == "Intercept" else factor_label(t) for t in terms]
-    fig = go.Figure()
-    annotations = []
-    n = len(models)
-    width = 0.8 / max(n, 1)
-    colors = model_colors(models)
-
-    for idx, m in enumerate(models):
-        lookup = dict(zip(m["fm"]["terms"], zip(m["fm"]["avg"], m["fm"]["se"], m["fm"]["t"])))
-        y = [lookup[t][0] if t in lookup else None for t in terms]
-        err = [T_CRIT * lookup[t][1] if t in lookup else None for t in terms]
-        fig.add_bar(
-            name=m["name"],
-            x=labels,
-            y=y,
-            error_y={"type": "data", "array": err, "color": INK, "thickness": 1.5, "width": 5},
-            marker_color=colors[idx],
-            customdata=[[lookup[t][2] if t in lookup else None] for t in terms],
-            hovertemplate="%{x}<br>γ = %{y:.3f}%<br>t = %{customdata[0]:.2f}<extra>"
-            + m["name"]
-            + "</extra>",
-        )
-        offset = (idx - (n - 1) / 2) * width
-        for k, t in enumerate(terms):
-            if t not in lookup:
-                annotations.append(
-                    dict(x=k + offset, y=0, text="n/a", showarrow=False, yshift=10,
-                         font=dict(size=9, color="#b6c2cc"))
-                )
-            elif t != "Intercept" and abs(lookup[t][2]) > T_CRIT:
-                g, se, tv = lookup[t]
-                top = g + T_CRIT * se if g >= 0 else g - T_CRIT * se
-                annotations.append(
-                    dict(x=k + offset, y=top, text=f"t = {tv:.1f}", showarrow=False,
-                         yshift=10 if g >= 0 else -10,
-                         font=dict(size=9, color=GREEN, family="Inter", weight=600))
-                )
-
-    fig.update_layout(
-        barmode="group",
-        bargap=0.35,
-        bargroupgap=0.12,
-        height=250,
-        margin=dict(l=40, r=8, t=12, b=30),
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        showlegend=False,
-        font=dict(family="Inter, sans-serif", size=10, color=MUTED),
-        annotations=annotations,
-        hoverlabel=dict(font_family="Inter"),
-    )
-    fig.update_xaxes(showgrid=False, showline=False, ticks="", tickfont=dict(size=10))
-    fig.update_yaxes(
-        ticksuffix="%",
-        gridcolor="#edf0f3",
-        zeroline=True,
-        zerolinecolor="#b6c2cc",
-        zerolinewidth=1,
-        tickfont=dict(size=10),
-        tickformat="+.1~f",
-    )
-    return fig
-
-
-def premia_caption(models):
-    priced = {}
-    intercept_sig = False
-    for m in models:
-        for term, g, t in zip(m["fm"]["terms"], m["fm"]["avg"], m["fm"]["t"]):
-            if abs(t) > T_CRIT:
-                if term == "Intercept":
-                    intercept_sig = True
-                else:
-                    priced[term] = g
-    if priced:
-        names = join_words(factor_phrase(f) for f in priced)
-        direction = "above" if all(g > 0 for g in priced.values()) else "different from"
-        verb = "earns a premium" if len(priced) == 1 else "earn premia"
-        first = f"Only {names} {verb} clearly {direction} zero."
-        first = first[0].upper() + first[1:]
-    else:
-        first = "No factor earns a premium clearly different from zero."
-    second = (
-        " A significant intercept means betas leave some average return unexplained."
-        if intercept_sig
-        else " The intercept is not significant, so betas account for average returns."
-    )
-    return first + second
-
-
-def premia_card(models):
-    legend = [
-        html.Div(
-            [
-                html.Div(className="legend-swatch", style={"backgroundColor": c}),
-                html.Span(m["name"], className="muted-10"),
-            ],
-            className="legend-item",
-        )
-        for m, c in zip(models, model_colors(models))
-    ]
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.Div("Which factors earn a premium?", className="card-title"),
-                    html.Div(
-                        "Average cross-sectional γ, % per month · whiskers = ±1.96 SE",
-                        className="muted-11",
-                    ),
-                    html.Div(legend, className="legend"),
-                ],
-                className="titles titles-8",
-            ),
-            dcc.Graph(figure=premia_figure(models), config={"displayModeBar": False},
-                      className="premia-graph"),
-            html.Div(premia_caption(models), className="muted-11"),
-        ],
-        className="card section half",
-    )
-
-
-# --- Detailed results tables ---
-
-
-def table(header, rows, first_col_width="150px", numeric_from=1):
+def table(header, rows, first_width):
     def row(cells, cls):
         return html.Div(
-            [
-                html.Div(c, className="t-cell t-first" if i == 0 else "t-cell t-num",
-                         style={"width": first_col_width} if i == 0 else None)
-                for i, c in enumerate(cells)
-            ],
+            [html.Div(cells[0], className="t-cell t-first", style={"width": first_width})]
+            + [cell(c, "t-num") for c in cells[1:]],
             className=cls,
         )
 
-    return html.Div(
-        [row(header, "t-row t-head")] + [row(r, "t-row") for r in rows], className="t-table"
-    )
+    return html.Div([row(header, "t-row t-head")] + [row(r, "t-row") for r in rows],
+                    className="t-table")
 
 
-def factor_summary_table(bundle):
+def t_cell(t, sig_cls="text-green"):
+    """t-statistic, emphasised when significant at 5%."""
+    return (fmt_plain(t), f"{sig_cls} strong") if is_sig(t) else fmt_plain(t)
+
+
+def factor_summary_card(m):
     rows = [
-        [factor_label(f), fmt_plain(s["mean"]), f"{s['var']:.3g}".replace("-", "−"),
-         fmt_plain(s["std"]), fmt_plain(s["sharpe"])]
-        for f, s in bundle["summary"].items()
+        [f, fmt_plain(s["mean"]), fmt_plain(s["var"]), fmt_plain(s["std"]), fmt_plain(s["sharpe"])]
+        for f, s in m["factor_summary"].items()
     ]
-    return html.Div(
-        table(["Factor", "Mean", "Variance", "Std dev", "Sharpe"], rows),
-        className="tab-body",
+    return detail_card(
+        "Factor summary", model_subtitle(m, "factors"),
+        table(["Factor", "Mean", "Variance", "Std dev", "Sharpe"], rows, "44px"),
+        cls="flex-1",
     )
 
 
-def ts_table(m):
-    header = ["Portfolio", "α", "t(α)"] + [f"β {f}" for f in m["factors"]]
+def gamma_rows(res):
+    return [
+        [term, fmt_plain(g), fmt_plain(se), t_cell(t)]
+        for term, g, se, t in zip(res["terms"], res["gamma"], res["se"], res["t"])
+    ]
+
+
+def one_shot_card(m):
+    os_ = m["one_shot"]
+    return detail_card(
+        "One-shot cross-sectional", f"Single regression across {N_PORT} portfolios",
+        table(["Term", "γ", "SE", "t"], gamma_rows(os_), "60px"),
+        footer=f"Cross-sectional R² = {fmt_plain(os_['r2'])}",
+        cls="flex-1",
+    )
+
+
+def fm_card(m):
+    fm = m["fm"]
+    return detail_card(
+        "Fama–MacBeth", "Average of period-by-period γ",
+        table(["Term", "γ", "SE", "t"], gamma_rows(fm), "60px"),
+        footer=f"Intercept t-statistic = {fmt_plain(fm['t'][0])}",
+        cls="flex-1",
+    )
+
+
+def grs_card(m):
+    rows = [
+        ["GRS F-statistic", fmt_plain(m["grs"])],
+        ["F-critical (5%)", fmt_plain(m["fcrit"])],
+        ["p-value", fmt_plain(m["p"])],
+        ["Reject H₀ (5%)", str(m["p"] < 0.05)],
+    ]
+    return detail_card("GRS joint alpha test", model_subtitle(m, "model"),
+                       table(["Statistic", "Value"], rows, "130px"), cls="fixed-328")
+
+
+def consistency_card(m):
+    c = m["consistency"]
+    rows = [
+        [f, fmt_plain(c["factor_means"][i]), fmt_plain(c["os_premia"][i]), fmt_plain(c["os_diff"][i]),
+         fmt_plain(c["fm_premia"][i]), fmt_plain(c["fm_diff"][i])]
+        for i, f in enumerate(m["factors"])
+    ]
+    footer = (
+        f"Pricing intercept: one-shot {fmt_plain(c['os_intercept'])} · "
+        f"Fama–MacBeth {fmt_plain(c['fm_intercept'])} (t = {fmt_plain(c['fm_intercept_t'])})"
+    )
+    return detail_card(
+        "Model consistency checks", "Estimated γ vs. factor mean (diff = γ − mean)",
+        table(["Factor", "Factor mean", "One-shot γ", "One-shot diff", "FM γ", "FM diff"], rows, "52px"),
+        footer=footer, cls="flex-1",
+    )
+
+
+def ts_card(m):
+    factors = m["factors"]
+    header = ["Portfolio", "α", "t(α)"]
+    for f in factors:
+        header += [f"β {f}", "t"]
     rows = []
     for i, p in enumerate(PORTFOLIO_COLS):
-        rows.append(
-            [p, fmt_plain(m["alpha"][i], 3), fmt_plain(m["t_alpha"][i])]
-            + [fmt_plain(m["beta"][k][i]) for k in range(len(m["factors"]))]
-        )
-    return html.Div(table(header, rows, "90px"), className="t-scroll")
-
-
-def fm_table(models):
-    rows = []
-    for m in models:
-        for term, g, se, t in zip(m["fm"]["terms"], m["fm"]["avg"], m["fm"]["se"], m["fm"]["t"]):
-            rows.append(
-                [m["name"], "γ₀ Intercept" if term == "Intercept" else factor_label(term),
-                 fmt_plain(g, 3), fmt_plain(se, 3), fmt_plain(t)]
-            )
-    return html.Div(
-        [
-            table(["Model", "Term", "Avg γ", "SE", "t"], rows, "110px"),
-            html.Div("|t| > 1.96 means the factor is priced at the 5% level.",
-                     className="muted-11"),
-        ],
-        className="tab-body",
+        r = [p, fmt_plain(m["alpha"][i]), t_cell(m["t_alpha"][i], "text-red")]
+        for k in range(len(factors)):
+            r += [fmt_plain(m["beta"][k][i]), fmt_plain(m["t_beta"][k][i])]
+        rows.append(r)
+    eq = " + ".join(f"β{BETA_SUB.get(f, '')} {f}" for f in factors)
+    return detail_card(
+        f"Time-series regressions · {m['name']} ({N_PORT})",
+        f"rₐ − rᶠ = α + {eq}  ·  |t| > {T_CRIT} highlighted in α",
+        table(header, rows, "120px"),
     )
+
+
+def portfolio_card(bundle):
+    ps = bundle["portfolio_summary"]
+    rows = [
+        [p, fmt_plain(ps["mean"][i]), fmt_plain(ps["var"][i]), fmt_plain(ps["std"][i]),
+         fmt_plain(ps["sharpe"][i])]
+        for i, p in enumerate(PORTFOLIO_COLS)
+    ]
+    return detail_card(
+        "Portfolio raw returns", f"{N_PORT} size × book-to-market portfolios",
+        table(["Portfolio", "Mean", "Variance", "Std dev", "Sharpe"], rows, "50px"),
+        cls="portfolio-card",
+    )
+
+
+# --- Plots ---
+
+
+def base_layout(fig, height=240):
+    fig.update_layout(
+        height=height,
+        margin=dict(l=34, r=4, t=6, b=6),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        showlegend=False,
+        font=dict(family="Inter, sans-serif", size=9, color=MUTED),
+        hoverlabel=dict(font_family="Inter"),
+    )
+    fig.update_yaxes(gridcolor=GRID, zeroline=True, zerolinecolor=AXIS, zerolinewidth=1,
+                     tickfont=dict(size=9), ticks="", showline=False)
+    return fig
+
+
+def returns_figure(bundle):
+    """Average excess return of each portfolio, grouped by size quintile."""
+    sizes = [p.split()[0] for p in PORTFOLIO_COLS]
+    bms = [p.split()[1] for p in PORTFOLIO_COLS]
+    fig = go.Figure(
+        go.Bar(
+            x=[sizes, bms],
+            y=bundle["avg_excess"],
+            marker=dict(color=BAR, cornerradius=2),
+            customdata=PORTFOLIO_COLS,
+            hovertemplate="%{customdata}<br>%{y:.3f}% per month<extra></extra>",
+        )
+    )
+    base_layout(fig)
+    fig.update_layout(bargap=0.36, margin=dict(b=30))
+    fig.update_xaxes(showgrid=False, showline=False, ticks="", tickfont=dict(size=8, color=MUTED),
+                     showdividers=False)
+    fig.update_yaxes(tickformat=".1f", nticks=6)
+    return fig
+
+
+def sml_figure(m, bundle):
+    """CAPM beta vs. average excess return, with the one-shot cross-sectional fit."""
+    betas = np.asarray(m["beta"][0])
+    rets = np.asarray(bundle["avg_excess"])
+    g0, g1 = m["one_shot"]["gamma"]
+    xs = np.array([betas.min(), betas.max()])
+    pad = 0.05 * (xs[1] - xs[0] or 1)
+    xs = xs + [-pad, pad]
+    fig = go.Figure(
+        [
+            go.Scatter(x=xs, y=g0 + g1 * xs, mode="lines", line=dict(color=AXIS, width=1.5, dash="dash"),
+                       hovertemplate="One-shot fit: γ₀ + γ₁β<extra></extra>"),
+            go.Scatter(x=betas, y=rets, mode="markers", marker=dict(color=BAR, size=7),
+                       customdata=PORTFOLIO_COLS,
+                       hovertemplate="%{customdata}<br>β = %{x:.2f}<br>%{y:.3f}% per month<extra></extra>"),
+        ]
+    )
+    base_layout(fig)
+    fig.update_layout(margin=dict(b=28))
+    fig.update_xaxes(showgrid=True, gridcolor=GRID, zeroline=False, tickfont=dict(size=9),
+                     title=dict(text="CAPM β", font=dict(size=9)), title_standoff=4)
+    fig.update_yaxes(tickformat=".1f")
+    return fig
+
+
+def graph(fig):
+    return dcc.Graph(figure=fig, config={"displayModeBar": False}, className="plot")
+
+
+def sml_card(bundle, model_names):
+    capm = next((m for m in bundle["models"] if m["name"] == "CAPM"), None)
+    if capm is None:
+        runs = join_words(model_names)
+        body = html.Div(
+            [
+                html.Div("No CAPM results loaded", className="empty-title"),
+                html.Div(
+                    f"The SML plot uses CAPM betas. This output only contains the {runs} run. "
+                    "Select the CAPM model and run again to populate it.",
+                    className="empty-text",
+                ),
+            ],
+            className="empty-state",
+        )
+    else:
+        body = graph(sml_figure(capm, bundle))
+    return detail_card("Security Market Line",
+                       "CAPM beta vs. average monthly return (%)",
+                       body, cls="fixed-328")
+
+
+def returns_card(bundle):
+    return detail_card(
+        "Average monthly portfolio returns",
+        f"Average excess return (%) · {N_PORT} size × book-to-market portfolios",
+        graph(returns_figure(bundle)),
+        cls="flex-1",
+    )
+
+
+def detailed_results(bundle, idx):
+    m = bundle["models"][idx]
+    names = [x["name"] for x in bundle["models"]]
+    return [
+        html.Div([factor_summary_card(m), one_shot_card(m), fm_card(m)], className="d-row"),
+        html.Div([sml_card(bundle, names), returns_card(bundle)], className="d-row"),
+        html.Div([grs_card(m), consistency_card(m)], className="d-row"),
+        # Time-series regressions for every model run, not just the selected one
+        *[ts_card(x) for x in bundle["models"]],
+    ]
 
 
 # =====================================
@@ -641,24 +640,13 @@ setup_panel = html.Div(
         model_card("capm", "CAPM", "Market risk"),
         model_card("multi", "Fama–French", "Three-factor model"),
         html.Button("Run analysis", id="run", n_clicks=0, className="run-btn"),
-        html.Div("Monthly returns · USD · Risk-free adjusted", className="muted-10 footnote"),
-    ],
-    className="setup",
-)
-
-hypothesis_panel = html.Div(
-    [
-        html.Div("Null hypothesis", className="hypothesis-title"),
-        html.Div(f"H₀: α₁ = α₂ = … = α{str(N_PORT).translate(SUBSCRIPT)} = 0",
-                 className="hypothesis-eq"),
         html.Div(
-            f"All {N_PORT} portfolio alphas are jointly zero, so the model fully explains "
-            "average excess returns. The GRS test rejects H₀ at 5% when the F-stat exceeds "
-            "the F critical-value (p < 0.05).",
-            className="hypothesis-text",
+            f"Monthly returns · USD · Risk-free adjusted · "
+            f"{'Ken French library' if DATA_SOURCE == 'french' else 'Class Excel data'}",
+            className="muted-10 footnote",
         ),
     ],
-    className="hypothesis",
+    className="setup",
 )
 
 results_panel = html.Div(
@@ -679,8 +667,8 @@ results_panel = html.Div(
         dcc.Loading(
             html.Div(id="results-body", className="results-body"),
             type="dot",
-            color=GREEN,
-            # Only show the spinner for a full re-run, not for tab switches
+            color="#087f67",
+            # Only show the spinner for a full re-run, not for model switches
             target_components={"results-body": "children"},
         ),
     ],
@@ -690,7 +678,7 @@ results_panel = html.Div(
 app = Dash(
     __name__,
     title="CAPM vs Fama–French",
-    # Result cards (tabs, model switcher) are created by the run callback
+    # Result cards (model switcher, detail body) are created by the run callback
     suppress_callback_exceptions=True,
     external_stylesheets=[
         "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap"
@@ -714,7 +702,10 @@ app.layout = html.Div(
                     className="page-header",
                 ),
                 html.Div(
-                    [html.Div([setup_panel, hypothesis_panel], className="side"), results_panel],
+                    [
+                        html.Div([setup_panel, html.Div(id="portfolio-summary")], className="side"),
+                        results_panel,
+                    ],
                     className="columns",
                 ),
             ],
@@ -808,9 +799,9 @@ def update_setup(models, factors, sm, sy, em, ey):
     else:
         title, desc = "Factor model", "Choose at least one factor"
 
-    _, msg, err = validate(sy, sm, ey, em, factors, models)
-    return (card_cls("capm"), card_cls("multi"), title, desc, msg,
-            "hint error" if err else "hint", err)
+    _, _, msg, level = validate(sy, sm, ey, em, factors, models)
+    hint_cls = {"ok": "hint", "warn": "hint warn", "error": "hint error"}[level]
+    return card_cls("capm"), card_cls("multi"), title, desc, msg, hint_cls, level == "error"
 
 
 @app.callback(
@@ -818,6 +809,7 @@ def update_setup(models, factors, sm, sy, em, ey):
     Output("results-body", "children"),
     Output("selection-chips", "children"),
     Output("status", "children"),
+    Output("portfolio-summary", "children"),
     Input("run", "n_clicks"),
     State("start-month", "value"),
     State("start-year", "value"),
@@ -827,15 +819,20 @@ def update_setup(models, factors, sm, sy, em, ey):
     State("models", "data"),
 )
 def run_analysis(_n, sm, sy, em, ey, factors, models):
-    sample, msg, err = validate(sy, sm, ey, em, factors, models)
-    if err:
-        status = html.Div(msg, className="status status-error")
-        return None, no_update, no_update, status
+    def fail(msg):
+        return None, no_update, no_update, html.Div(msg, className="status status-error"), no_update
 
-    specs = requested_models(models, factors)
-    bundle = analyse(sample, specs)
+    sample, specs, msg, level = validate(sy, sm, ey, em, factors, models)
+    if level == "error":
+        return fail(msg)
+
+    try:
+        bundle = analyse(sample, specs)
+    except (ValueError, np.linalg.LinAlgError) as err:
+        # run_model re-validates the data and checks matrix conditioning
+        return fail(f"Analysis failed: {tidy(err)}")
+
     ms = bundle["models"]
-
     selections = [
         html.Span("Your selections", className="muted-10 strong"),
         chip(f"{month_label(bundle['start'])} – {month_label(bundle['end'])} · "
@@ -844,12 +841,13 @@ def run_analysis(_n, sm, sy, em, ey, factors, models):
         chip(" + ".join(m["name"] for m in ms)),
         chip(f"{N_PORT} Size × B/M portfolios"),
     ]
-    status = html.Div(
-        [html.Span("✓  Complete", className="strong"),
-         html.Span(f"{len(ms)} model{'s' if len(ms) > 1 else ''} tested")],
-        className="status",
-    )
+    status_children = [html.Span("✓  Complete", className="strong"),
+                       html.Span(f"{len(ms)} model{'s' if len(ms) > 1 else ''} tested")]
+    if level == "warn":
+        status_children.append(html.Span(f"Low power: T < {LOW_POWER_MONTHS}"))
+    status = html.Div(status_children, className="status")
 
+    default_idx = len(ms) - 1  # show the multi-factor model's details first
     body = [
         html.Div([verdict_card(m) for m in ms], className="verdicts"),
         html.Div(
@@ -857,61 +855,35 @@ def run_analysis(_n, sm, sy, em, ey, factors, models):
              html.Span(takeaway_text(ms), className="takeaway-text")],
             className="takeaway",
         ),
-        heatmap_card(ms),
         html.Div(
             [
-                premia_card(ms),
-                html.Div(
-                    [
-                        html.Div("Detailed results", className="card-title"),
-                        dcc.Tabs(
-                            id="detail-tab",
-                            value="summary",
-                            className="tabs",
-                            children=[
-                                dcc.Tab(label="Factor summary", value="summary",
-                                        className="tab", selected_className="tab-active"),
-                                dcc.Tab(label=f"Time-series regressions ({N_PORT})", value="ts",
-                                        className="tab", selected_className="tab-active"),
-                                dcc.Tab(label="Fama–MacBeth", value="fm",
-                                        className="tab", selected_className="tab-active"),
-                            ],
-                        ),
-                        dcc.RadioItems(
-                            id="ts-model",
-                            options=[{"label": m["name"], "value": i} for i, m in enumerate(ms)],
-                            value=0,
-                            inline=True,
-                            className="segmented",
-                        ),
-                        html.Div(id="detail-body"),
-                    ],
-                    className="card section half",
+                html.Div("Detailed results", className="section-title"),
+                dcc.RadioItems(
+                    id="detail-model",
+                    options=[{"label": m["name"], "value": i} for i, m in enumerate(ms)],
+                    value=default_idx,
+                    inline=True,
+                    className="segmented",
+                    style=None if len(ms) > 1 else {"display": "none"},
                 ),
             ],
-            className="bottom-row",
+            className="section-head",
         ),
+        html.Div(detailed_results(bundle, default_idx), id="detail-body", className="details"),
     ]
-    return bundle, body, selections, status
+    return bundle, body, selections, status, portfolio_card(bundle)
 
 
 @app.callback(
     Output("detail-body", "children"),
-    Output("ts-model", "style"),
-    Input("detail-tab", "value"),
-    Input("ts-model", "value"),
-    Input("bundle", "data"),
+    Input("detail-model", "value"),
+    State("bundle", "data"),
+    prevent_initial_call=True,
 )
-def render_detail(tab, model_idx, bundle):
-    if not bundle:
-        return no_update, no_update
-    hidden, shown = {"display": "none"}, {}
-    if tab == "ts":
-        m = bundle["models"][model_idx or 0]
-        return ts_table(m), shown if len(bundle["models"]) > 1 else hidden
-    if tab == "fm":
-        return fm_table(bundle["models"]), hidden
-    return factor_summary_table(bundle), hidden
+def switch_model(idx, bundle):
+    if not bundle or idx is None:
+        return no_update
+    return detailed_results(bundle, idx)
 
 
 if __name__ == "__main__":
