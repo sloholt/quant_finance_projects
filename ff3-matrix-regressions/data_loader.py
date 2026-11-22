@@ -53,33 +53,42 @@ def load_excel_data(file_path=EXCEL_PATH):
 
 
 def load_french_data():
-    """Download monthly FF3 factors and 25 MB-BM portfolios"""
-    # faactor returns
+    """Download monthly FF3, momentum, and 25 MB-BM portfolios."""
+
+    # Fama-French 3 factors
     factors = web.DataReader(
         "F-F_Research_Data_Factors", "famafrench", start="1926-07-01"
     )[0]
 
-    # monthly value-weighted portfolio returns
+    # Momentum factor
+    momentum = web.DataReader("F-F_Momentum_Factor", "famafrench", start="1926-07-01")[
+        0
+    ]
+
+    # Monthly value-weighted portfolios
     portfolios = web.DataReader("25_Portfolios_5x5", "famafrench", start="1926-07-01")[
         0
     ]
 
-    print("Original French columns:")
-    print(portfolios.columns.tolist())
-
+    # Standardize factor names
     factors = factors.rename(columns={"Mkt-RF": "RMRF"})
-    # Confirm 25 portfolios were downloaded
+    momentum.columns = ["MOM"]
+
+    # Validate portfolio count
     if portfolios.shape[1] != 25:
         raise ValueError(f"Expected 25 portfolios, found {portfolios.shape[1]}")
 
     portfolios = portfolios.copy()
     portfolios.columns = PORTFOLIO_COLS
 
-    data = factors.join(portfolios, how="inner")
+    # Join all datasets on their monthly PeriodIndex
+    data = factors.join(momentum, how="inner")
+    data = data.join(portfolios, how="inner")
 
-    # Convert PeriodIndex to YYYYMM
+    # Convert dates to YYYYMM
     data[DATE_COL] = data.index.year * 100 + data.index.month
 
+    # Replace French missing-value codes
     data = data.replace([-99.99, -999], np.nan)
 
     return clean_data(data.reset_index(drop=True))

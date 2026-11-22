@@ -2,13 +2,10 @@ import pandas as pd
 import numpy as np
 import validation as v
 from scipy.stats import f
+from itertools import combinations
 
 from reporting import export_results_to_excel, plot_portfolio_returns, plot_sml
 from data_loader import load_data, PORTFOLIO_COLS, DATE_COL, RF_COL
-
-# =====================================
-# SHARED UTILITY FUNCTIONS
-# =====================================
 
 # --- Helper Functions ---
 
@@ -27,10 +24,7 @@ def add_constant(F):
 
 
 def excess_returns(rawrets, rf):
-    """ret = Rawret - rf*1
-    Note: Use rf*1 because multiplying rf by 1' expands each month's risk-free rate across
-    all asset columns to match the dimensions of rawret.
-    """
+    """ret = Rawret - rf*1"""
     return as_2d(rawrets) - as_2d(rf)
 
 
@@ -71,7 +65,7 @@ def resid_covmat(E, num_factors):
 
 # --- Time Series Regressions ----
 def time_series_regression(R, F):
-    """Run N time-series OLS regressions simultaneously.
+    """N time-series OLS regressions simultaneously.
 
     B    = (X'X)^-1 X'R           Coefficient matrix (K+1 x N)
     E    = R - XB                  Residual matrix (T x N)
@@ -79,29 +73,25 @@ def time_series_regression(R, F):
     SE   = sqrt(diag((X'X)^-1) outer s2)
 
     """
-    # Ensure inputs are 2D arrays
     R, F = as_2d(R), as_2d(F)
 
     # Number of observations (T) and factors (K)
     T, K = F.shape
-
-    # Add intercept column to factor matrix
     X = add_constant(F)
 
-    # Estimate OLS coefficients
+    # OLS coefficients
     B = np.linalg.lstsq(X, R, rcond=None)[0]
     v.check_matrix_condition(X.T @ X)
     XtX_inv = np.linalg.inv(X.T @ X)
 
     E = R - X @ B
 
-    # Estimate residual variance for each asset
+    # Residual variance for each asset
     s2 = (E**2).sum(axis=0) / (T - K - 1)
 
-    # Calculate standard errors and t-statistics
+    # Standard errors and t-statistics
     SE = np.sqrt(np.outer(np.diag(XtX_inv), s2))
     tstat = B / SE
-    # Return regression results as a dictionary
     return {
         "alpha": B[0],
         "beta": B[1:],
@@ -206,7 +196,7 @@ def one_shot_cross_sectional(avg_rets, betas):
 
     se_gamma = np.sqrt(np.diag(cov_gamma))
 
-    # t-statistics
+    # t-stats
     t_gamma = np.divide(
         gamma, se_gamma, out=np.full_like(gamma, np.nan), where=se_gamma > 0
     )
@@ -252,11 +242,6 @@ def model_consistency_checks(factor_means, one_shot, fm_results):
     }
 
 
-# =====================================
-# CAPM & FAMA-FRENCH MODEL BUILDING
-# =====================================
-
-
 # --- Full Model Run ---
 """Chat prompt: add a section to run model that uses summary_stats to calculate the values for each of the
 factors given as input"""
@@ -294,7 +279,6 @@ def run_model(data, portfolio, factors):
     )
     portfolio_stats = summary_stats(rawrets, rfvec=rf)
     expected_excess_returns = rets.mean(axis=0)
-    # expected_excess_returns = portfolio_stats["mean"]
 
     portfolio_summary_df = pd.DataFrame(
         {
@@ -321,7 +305,7 @@ def run_model(data, portfolio, factors):
     gamma = get_gamma(rets, betas)
     fm_results = cross_sectional(gamma)
 
-    # One-shot cross-sectional regression
+    # One-shot cross-sectional
     one_shot_results = one_shot_cross_sectional(expected_excess_returns, betas)
     # Model consistency checks
     consistency_results = model_consistency_checks(
@@ -347,11 +331,6 @@ def run_model(data, portfolio, factors):
     )
 
     return model_results
-
-
-# =====================================
-# USER INPUT: DATE RANGE & FACTORS
-# =====================================
 
 
 def available_factors(data):
@@ -385,7 +364,6 @@ def prompt_date_range(data, max_factors):
 
     while True:
         try:
-            # Get user input
             start_in = input(f"Start month [YYYYMM, Enter = {first}]: ").strip()
             end_in = input(f"End month   [YYYYMM, Enter = {last}]: ").strip()
 
@@ -416,44 +394,65 @@ def prompt_date_range(data, max_factors):
 
 
 def model_name_for(factors):
-    """Readable label for a factor combination."""
-    if factors == ["RMRF"]:
+    """Return a unique readable name for each factor combination."""
+
+    factor_set = set(factors)
+
+    if factor_set == {"RMRF"}:
         return "CAPM"
-    if sorted(factors) == sorted(["RMRF", "SMB", "HML"]):
+
+    if factor_set == {"RMRF", "SMB", "HML"}:
         return "Fama-French 3-Factor"
-    return f"{len(factors)}-Factor Model ({', '.join(factors)})"
+
+    if factor_set == {"RMRF", "SMB", "HML", "MOM"}:
+        return "Carhart 4-Factor"
+
+    return f"{len(factors)}-Factor ({', '.join(sorted(factors))})"
 
 
 def prompt_factor_models(factor_options):
-    """Ask for one or more factor combinations.
+    """Select factor combinations or run all possible models."""
 
-    Factors within a model are separated by spaces or commas; models by ';'.
-    Example: RMRF; RMRF SMB HML; SMB HML
-    """
-    lookup = {f.upper(): f for f in factor_options}
-    default = "RMRF; " + " ".join(
-        f for f in ["RMRF", "SMB", "HML"] if f.upper() in lookup
-    )
+    default = "RMRF; RMRF SMB HML; RMRF SMB HML MOM"
 
     print(f"\nAvailable factors: {', '.join(factor_options)}")
-    print("Enter one or more factor combinations, separating models with ';'")
-    print("  e.g.  RMRF; RMRF SMB HML; SMB HML")
+    print("Enter factor combinations separated by ';'")
+    print("Enter ALL to run every possible combination.")
+    print("Examples:")
+    print("  RMRF MOM")
+    print("  RMRF; RMRF SMB HML; RMRF SMB HML MOM")
+    print("  ALL")
+
     while True:
-        raw = input(f"Models [Enter = {default}]: ").strip() or default
+        raw = input(f"Models [Enter = {default}]: ").strip()
+
+        if not raw:
+            raw = default
+
+        if raw.upper() == "ALL":
+            return [list(factor_options)]
+
         try:
             models = []
+
             for chunk in raw.split(";"):
                 tokens = chunk.replace(",", " ").split()
+
                 if not tokens:
                     continue
+
                 factors = v.validate_factors(tokens, factor_options)
-                if factors not in models:
+
+                if not any(set(factors) == set(m) for m in models):
                     models.append(factors)
+
             if not models:
                 raise ValueError("Enter at least one factor.")
+
             return models
+
         except ValueError as err:
-            print(f"  Invalid input: {err} Please try again.\n")
+            print(f"Invalid input: {err} Please try again.\n")
 
 
 # --- Main ---
@@ -627,7 +626,7 @@ def main():
     print(comparison_df.round(4).to_string())
 
 
-main()
+# main()
 
 if __name__ == "__main__":
     main()

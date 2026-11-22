@@ -69,13 +69,16 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
     and statistics as rows on one worksheet.
     """
 
-    # Identify model
-    if factors == ["RMRF"]:
+    factor_set = set(factors)
+
+    if factor_set == {"RMRF"}:
         model_name = "CAPM"
-    elif set(factors) == {"RMRF", "SMB", "HML"}:
+    elif factor_set == {"RMRF", "SMB", "HML"}:
         model_name = "FF3"
+    elif factor_set == {"RMRF", "SMB", "HML", "MOM"}:
+        model_name = "Carhart4"
     else:
-        model_name = f"{len(factors)}_Factor"
+        model_name = "_".join(sorted(factors))
 
     if output_path is None:
         output_path = f"results/{model_name}_Asset_Pricing_Report.xlsx"
@@ -87,7 +90,6 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
     ws = wb.active
     ws.title = model_name
 
-    # Workbook title
     ws["A1"] = f"{model_name} ASSET PRICING ANALYSIS"
 
     # Portfolio column headers
@@ -99,9 +101,7 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
     row = 4
     N = len(portfolio)
 
-    # -------------------------
     # Portfolio Summary
-    # -------------------------
     ws.cell(row, 1, "PORTFOLIO RAW RETURN SUMMARY STATISTICS")
     ws.cell(row, 1).font = Font(bold=True)
     row += 1
@@ -118,9 +118,7 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
 
     row += 2
 
-    # -------------------------
     # Time-Series Regression
-    # -------------------------
     ws.cell(row, 1, "TIME-SERIES REGRESSION")
     ws.cell(row, 1).font = Font(bold=True)
     row += 1
@@ -168,9 +166,7 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
 
     row += 2
 
-    # -------------------------
     # GRS Test
-    # -------------------------
     ws.cell(row, 1, "GRS TEST (MODEL-WIDE)")
     ws.cell(row, 1).font = Font(bold=True)
     row += 1
@@ -187,9 +183,7 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
         ws.cell(row, 2, value)
         row += 1
 
-    # -------------------------
-    # One-Shot Cross-Sectional Regression
-    # -------------------------
+    # One-Shot Cross-Sectional
     row += 2
 
     ws.cell(row, 1, "ONE-SHOT CROSS-SECTIONAL REGRESSION")
@@ -227,9 +221,7 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
 
         row += 1
 
-        # -------------------------
     # Model Consistency Checks
-    # -------------------------
     row += 2
 
     ws.cell(row, 1, "MODEL CONSISTENCY CHECKS")
@@ -265,7 +257,6 @@ def export_results_to_excel(model_results, factors, portfolio, output_path=None)
         ws.cell(row, 2, float(value))
         row += 1
 
-    # Format and save
     format_workbook(ws)
     wb.save(output_path)
 
