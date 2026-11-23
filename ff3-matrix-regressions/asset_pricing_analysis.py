@@ -250,7 +250,7 @@ def cross_sectional(gamma):
     gamma = as_2d(gamma)
     T = gamma.shape[0]
     avg_gamma = gamma.mean(axis=0)
-    se_gamma = gamma.std(axis=0, ddof=1) / np.sqrt(T)
+    se_gamma = gamma.std(axis=0, ddof=0) / np.sqrt(T)
     t_stat = (avg_gamma - 0) / se_gamma
     return {"avg_gamma": avg_gamma, "se_gamma": se_gamma, "t_gamma": t_stat}
 
