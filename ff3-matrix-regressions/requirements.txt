@@ -1,7 +1,9 @@
-
 numpy
 pandas
 pandas-datareader
 scipy
 openpyxl
 matplotlib
+
+dash
+plotly

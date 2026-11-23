@@ -1,52 +1,60 @@
-# CAPM Tests on 25 Size/Book-to-Market Portfolios
- 
-This script tests the CAPM on the 25 Fama-French portfolios sorted on size (ME) and book-to-market (BM). It uses matrix algebra in NumPy instead of a regression package, and it reproduces an Excel implementation of the same steps.  
+# Asset Pricing Analysis
 
-Null Hypothesis: 
+This project tests CAPM, Fama–French three-factor, and other selected factor models (including momentum) on 25 size/book-to-market portfolios. It uses NumPy matrix calculations for time-series regressions, the Gibbons–Ross–Shanken (GRS) test, one-shot cross-sectional regressions, and Fama–MacBeth estimation. Results are displayed in the terminal, exported to Excel, and available through an optional dashboard.
 
-## Requirements
- 
-```bash
-pip install numpy pandas scipy openpyxl
-```
+## Setup and running
 
-## Data  
+From the project root, using Python 3.10+:  
 
-ME1 holds the smallest stocks and ME5 the largest. BM1 is the lowest book-to-market (growth) and BM5 the highest (value). Column names are stripped of surrounding spaces before use.
+To launch the interactive dashboard:  
 
-## Usage 
-
-To run the command-line only calculations: 
-```bash 
-python capm_analysis.py
-```
-To run and view the dashboard:  
 ```bash
 python dashboard.py
-```  
-To run the simulation tests:  
+```
+Open `http://127.0.0.1:8050`. The dashboard uses the same calculations and expects `assets/dashboard.css` for its styling.  
+
+To view the command-line only model:  
+```bash
+pip install -r requirements.txt
+python asset_pricing_analysis.py
+```
+
+The script downloads monthly data from [Ken French Data Library](https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html), then prompts for factor combinations and a start/end month (`YYYYMM`). Available factors are `RMRF`, `SMB`, `HML`, and `MOM`. Results are written to `results/`. No machine-specific absolute paths are required.  
+
+To run automated tests:
+
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-## Method 
-**Notation:** T = months, N = portfolios, K = factors (K = 1 for the CAPM).  
+## Architecture and design notes
 
-| Symbol | Shape | Meaning |
-|---|---|---|
-| R | T × N | Portfolio excess returns |
-| F | T × K | Factor returns (market excess return) |
-| X = [1, F] | T × (K+1) | Regressors with an intercept column |
-| B | (K+1) × N | Coefficients: row 0 = alphas, row 1 = betas |
-| E | T × N | Residuals |  
+| File | Purpose |
+|---|---|
+| `data_loader.py` | Download, combine, and clean factor and portfolio data; support Excel inputs. |
+| `validation.py` | Check dates, factors, missing values, sample sizes, and matrix conditioning. |
+| `asset_pricing_analysis.py` | Run regressions, GRS tests, cross-sectional analysis, and model comparisons. |
+| `reporting.py` | Print results, create plots, and export Excel reports. |
+| `dashboard.py` | Interactive interface using the same analysis functions. |
 
-| Step | Function | Formula |
-|---|---|---|
-| 1. Excess returns | `excess_returns` | R = RAWRET − rf·1' |
-| 2. Summary stats (raw returns) | `summary_stats` | mean, var (ddof=1), sd; Sharpe = (mean − mean(rf)) / sd |
-| 3. Time-series OLS | `time_series_regression` | B = (X'X)⁻¹X'R, E = R − XB, SE = √(diag((X'X)⁻¹) · e'e/(T−K−1)), t = B/SE |
-| 4. Residual covariance | `resid_covmat` | Σ = Ec'Ec / (T−1), where Ec = E − mean(E) |
-| 5. GRS test | `grs_test` | (T−N−K)/N · α'Σ⁻¹α / (1 + mean(RMRF)²/var(RMRF)) ~ F(N, T−N−K) |
-| 6. Fama-MacBeth | `get_gamma`, `capm_cross_sectional` | γ_t = monthly slope of R_t on β; γ̄ = mean(γ_t), SE = std(γ_t)/√T |
- 
-The GRS test rejects H₀ (all alphas = 0) when F is greater than the 5% critical value, which is evidence against the CAPM. In the Fama-MacBeth step, a |t(γ̄)| below about 2 means beta isn't priced.
+**Data flow:** Load data → validate inputs → calculate excess returns → estimate factor models → test joint alphas and risk premia → report results.
+
+I initially built the calculations step by step from the in-class CAPM Excel workbook, using matrix algebra to reproduce the workbook's results. After studying Fama–French, I refactored the CAPM-specific code into reusable functions that accept different factor combinations while preserving the original Excel calculation sequence. I separated loading, validation, estimation, and reporting so the code would be easier to test and the dashboard could reuse the same results. I used NumPy rather than a regression package to keep the calculations transparent and directly comparable to Excel.
+
+**Next improvements:** Make dashboard exports optional rather than automatic and extend potential portfolio options and risk factors for increased flexibility and customization. 
+
+## Hypotheses
+
+For the GRS joint-alpha test:
+
+- **H₀:** All 25 portfolio alphas are zero; the selected factor model has no joint pricing errors.
+- **H₁:** At least one portfolio alpha is nonzero.
+
+At the 5% significance level, a p-value below 0.05 leads to rejection of H₀.
+
+## Contribution statement
+
+- **Analysis and implementation:** Sloane — [Specify who implemented data processing, model calculations, and integration].
+- **Testing and validation:** Sloane — [Specify who wrote and ran tests and checked results against Excel].
+- **Reporting and dashboard:** Sloane — [Specify who implemented exports, plots, and the dashboard].
+- **AI assistance:** See Appendix II of report 

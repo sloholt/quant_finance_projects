@@ -735,14 +735,14 @@ def main():
 
     # Table 6
 
-    part1_workbook = Path("data/project2_part1.xlsx")
+    # part1_workbook = Path("data/project2_part1.xlsx")
 
-    class_workbook = Path("data/CAPM_FF3F_Raw_Data_SizeBM.xlsx")
+    # class_workbook = Path("data/CAPM_FF3F_Raw_Data_SizeBM.xlsx")
 
-    run_table6_validation(
-        part1_workbook_path=part1_workbook,
-        class_workbook_path=class_workbook,
-    )
+    # run_table6_validation(
+    #    part1_workbook_path=part1_workbook,
+    #    class_workbook_path=class_workbook,
+    # )
 
 
 if __name__ == "__main__":
