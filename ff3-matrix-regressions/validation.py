@@ -3,6 +3,15 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
+CATEGORIES = [
+    "Regression coefficients",
+    "Standard errors",
+    "t-statistics",
+    "GRS F statistic and p-value",
+    "One-shot gammas and standard errors",
+    "Fama-MacBeth gammas, standard errors, t-statistics",
+]
+
 
 def validate_sample_size(T, N, K):
     """Check that the sample has enough observations for the GRS test.
@@ -191,3 +200,174 @@ def check_matrix_condition(matrix, threshold=1e12):
             f"Matrix is singular or ill-conditioned "
             f"(condition number: {condition:.2e})."
         )
+
+
+def max_absolute_difference(reference, calculated):
+    """Calculate maximum absolute difference and identify invalid values."""
+
+    reference = np.asarray(reference, dtype=float)
+    calculated = np.asarray(calculated, dtype=float)
+
+    if reference.shape != calculated.shape:
+        raise ValueError(
+            f"Shape mismatch: reference={reference.shape}, "
+            f"calculated={calculated.shape}"
+        )
+
+    if not np.all(np.isfinite(reference)):
+        raise ValueError(f"Non-finite reference values: {reference}")
+
+    if not np.all(np.isfinite(calculated)):
+        raise ValueError(f"Non-finite calculated values: {calculated}")
+
+    return float(np.max(np.abs(reference - calculated)))
+
+
+def validate_model_results(results, reference):
+    """Compare run_model() results against Part 1 Excel reference."""
+
+    reg = results["regression"]
+    one = results["one_shot"]
+    fm = results["fama_macbeth"]
+
+    calculated = {
+        CATEGORIES[0]: np.concatenate(
+            [
+                reg["alpha"].ravel(),
+                reg["beta"].ravel(),
+            ]
+        ),
+        CATEGORIES[1]: np.concatenate(
+            [
+                reg["se_alpha"].ravel(),
+                reg["se_beta"].ravel(),
+            ]
+        ),
+        CATEGORIES[2]: np.concatenate(
+            [
+                reg["t_alpha"].ravel(),
+                reg["t_beta"].ravel(),
+            ]
+        ),
+        CATEGORIES[3]: np.array(
+            [
+                results["grs_stat"],
+                results["grs_pvalue"],
+            ]
+        ),
+        CATEGORIES[4]: np.concatenate(
+            [
+                one["gamma"].ravel(),
+                one["se_gamma"].ravel(),
+            ]
+        ),
+        CATEGORIES[5]: np.concatenate(
+            [
+                fm["avg_gamma"].ravel(),
+                fm["se_gamma"].ravel(),
+                fm["t_gamma"].ravel(),
+            ]
+        ),
+    }
+
+    differences = {}
+
+    for category in CATEGORIES:
+        try:
+            differences[category] = max_absolute_difference(
+                reference[category],
+                calculated[category],
+            )
+        except ValueError as error:
+            raise ValueError(f"Validation failed for '{category}': {error}") from error
+
+    return differences
+
+
+def validate_class_benchmark(capm_results, ff3_results, reference):
+    """Compare CAPM and FF3 outputs against class Table A2."""
+
+    comparisons = {
+        "GRS statistic and p-value": [],
+        "GRS critical value": [],
+        "One-shot gamma and standard error": [],
+        "Fama-MacBeth gamma": [],
+        "Fama-MacBeth standard error": [],
+        "Fama-MacBeth t-statistic": [],
+        "Cross-sectional R-squared": [],
+        "Factor means": [],
+    }
+
+    for name, results in [
+        ("CAPM", capm_results),
+        ("FF3", ff3_results),
+    ]:
+        ref = reference[name]
+        fm = results["fama_macbeth"]
+
+        comparisons["GRS statistic and p-value"].append(
+            max_absolute_difference(
+                [ref["grs_stat"], ref["grs_pvalue"]],
+                [results["grs_stat"], results["grs_pvalue"]],
+            )
+        )
+
+        comparisons["GRS critical value"].append(
+            max_absolute_difference(
+                [ref["grs_fcrit"]],
+                [results["grs_fcrit"]],
+            )
+        )
+
+        comparisons["Cross-sectional R-squared"].append(
+            max_absolute_difference(
+                [ref["r_squared"]],
+                [results["one_shot"]["r_squared"]],
+            )
+        )
+
+        comparisons["Fama-MacBeth gamma"].append(
+            max_absolute_difference(
+                ref["fm_gamma"],
+                fm["avg_gamma"][1:],
+            )
+        )
+
+        comparisons["Fama-MacBeth standard error"].append(
+            max_absolute_difference(
+                ref["fm_se"],
+                fm["se_gamma"][1:],
+            )
+        )
+
+        comparisons["Fama-MacBeth t-statistic"].append(
+            max_absolute_difference(
+                ref["fm_t"],
+                fm["t_gamma"][1:],
+            )
+        )
+
+        if name == "CAPM":
+            one = results["one_shot"]
+
+            comparisons["One-shot gamma and standard error"].append(
+                max_absolute_difference(
+                    [ref["one_shot_gamma"], ref["one_shot_se"]],
+                    [one["gamma"][1], one["se_gamma"][1]],
+                )
+            )
+
+        if name == "FF3":
+            factor_means = results["factor_summary"]["Mean"].to_numpy()
+
+            comparisons["Factor means"].append(
+                max_absolute_difference(
+                    ref["factor_means"],
+                    factor_means,
+                )
+            )
+
+    return {
+        category: max(values) if values else None
+        for category, values in comparisons.items()
+    }

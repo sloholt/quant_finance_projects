@@ -1,12 +1,9 @@
 # CAPM Tests on 25 Size/Book-to-Market Portfolios
  
-This script tests the CAPM on the 25 Fama-French portfolios sorted on size (ME) and book-to-market (BM). It uses matrix algebra in NumPy instead of a regression package, and it reproduces an Excel implementation of the same steps.
- 
-It runs three things:
- 
-1. **Time-series regressions.** Each portfolio's excess return is regressed on the market excess return to estimate its alpha and beta.
-2. **GRS F-test.** Tests whether all 25 alphas are jointly zero.
-3. **Fama-MacBeth regressions.** Tests whether beta is priced in the cross-section of returns.
+This script tests the CAPM on the 25 Fama-French portfolios sorted on size (ME) and book-to-market (BM). It uses matrix algebra in NumPy instead of a regression package, and it reproduces an Excel implementation of the same steps.  
+
+Null Hypothesis: 
+
 ## Requirements
  
 ```bash
@@ -19,10 +16,18 @@ ME1 holds the smallest stocks and ME5 the largest. BM1 is the lowest book-to-mar
 
 ## Usage 
 
+To run the command-line only calculations: 
 ```bash 
 python capm_analysis.py
 ```
-Everything prints to the console. The script doesn't currently write any files.
+To run and view the dashboard:  
+```bash
+python dashboard.py
+```  
+To run the simulation tests:  
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Method 
 **Notation:** T = months, N = portfolios, K = factors (K = 1 for the CAPM).  

@@ -1,5 +1,7 @@
+
 numpy
 pandas
 pandas-datareader
 scipy
 openpyxl
+matplotlib

@@ -2,10 +2,27 @@ import pandas as pd
 import numpy as np
 import validation as v
 from scipy.stats import f
-from itertools import combinations
+from pathlib import Path
+from openpyxl import load_workbook
 
-from reporting import export_results_to_excel, plot_portfolio_returns, plot_sml
-from data_loader import load_data, PORTFOLIO_COLS, DATE_COL, RF_COL
+from reporting import (
+    export_results_to_excel,
+    plot_portfolio_returns,
+    plot_sml,
+    generate_summary,
+    display_results,
+    export_validation_table,
+)
+from data_loader import (
+    load_data,
+    PORTFOLIO_COLS,
+    DATE_COL,
+    RF_COL,
+    load_excel_data,
+    read_class_reference,
+    read_part1_reference,
+    load_part1_data,
+)
 
 # --- Helper Functions ---
 
@@ -49,7 +66,7 @@ def resid_covmat(E, num_factors):
     """Calculate residuals, demeaned residuals, and residual covariance matrix.
     E = R - XB                      Residuals (T x N)
     Ec = E - mean(E)                Demeaned residuals (T x N)
-    Sigma = Ec' Ec / (T-1)          Residual covariance matrix (N x N)
+    Sigma = Ec' Ec / (T-K-1)          Residual covariance matrix (N x N)
 
     """
     # Dimensionality checks:
@@ -58,9 +75,9 @@ def resid_covmat(E, num_factors):
     T = E.shape[0]
 
     emat = E - E.mean(axis=0)
-    ecovmat = emat.T @ emat / (T - num_factors - 1)
+    residcovmat = emat.T @ emat / (T - num_factors - 1)
 
-    return {"resids": E, "residemat": emat, "residcovmat": ecovmat}
+    return {"resids": E, "residemat": emat, "residcovmat": residcovmat}
 
 
 # --- Time Series Regressions ----
@@ -130,26 +147,44 @@ def get_gamma(R, betas):
 array give."""
 
 
-def grs_test(T, N, num_factors, alphas, factors, residcovmat):
-    """Calculate the Gibbons-Ross-Shanken (GRS) F-statistic to test CAPM or Fama-French."""
+def grs_test(
+    T,
+    N,
+    num_factors,
+    alphas,
+    factors,
+    residcovmat,
+):
+    """Calculate the Gibbons-Ross-Shanken (GRS) F-statistic."""
+
     factors = as_2d(factors)
     alphas = np.asarray(alphas).reshape(-1, 1)
+    residcovmat = np.atleast_2d(residcovmat)
 
+    # Factor means
     factor_means = factors.mean(axis=0).reshape(-1, 1)
-    factor_covmat = np.atleast_2d(np.cov(factors, rowvar=False, ddof=0))
+    # Factor covariance
+    factor_demeaned = factors - factors.mean(axis=0)
 
+    # factor_covmat = factor_demeaned.T @ factor_demeaned / (T - 1)
+    # first_term = (T - N - num_factors) / N
+    factor_covmat = factor_demeaned.T @ factor_demeaned / T  # MLE, not T-1
+    first_term = (T - N - num_factors) / N * T / (T - num_factors - 1)
+
+    # Check matrix conditioning
     v.check_matrix_condition(residcovmat)
     v.check_matrix_condition(factor_covmat)
 
-    first_term = ((T - N - num_factors)) / N * (T / (T - num_factors - 1))
+    # GRS numerator
     numerator = (alphas.T @ np.linalg.solve(residcovmat, alphas)).item()
+
+    # GRS denominator
     denominator = (
-        1 + (factor_means.T @ np.linalg.solve(factor_covmat, factor_means)).item()
-    )
-    # print("Alpha shape:", np.asarray(alphas).shape)
-    # print("Covariance shape:", np.asarray(residcovmat).shape)
-    # print("Covariance type:", type(residcovmat))
-    return first_term * (numerator / denominator)
+        1 + factor_means.T @ np.linalg.solve(factor_covmat, factor_means)
+    ).item()
+
+    grs_stat = first_term * numerator / denominator
+    return grs_stat
 
 
 def fgrs_hypothesis(fgrs, f_critical, model_name):
@@ -247,7 +282,7 @@ def model_consistency_checks(factor_means, one_shot, fm_results):
 factors given as input"""
 
 
-def run_model(data, portfolio, factors):
+def run_model(data, portfolio, factors, export=True):
     """Run asset pricing analysis for selected factors"""
 
     # Validate required columns
@@ -296,7 +331,14 @@ def run_model(data, portfolio, factors):
     residuals = resid_covmat(results["resids"], num_factors=num_factors)
     RESIDCOVMAT = residuals["residcovmat"]
 
-    fgrs = grs_test(T, N, num_factors, alphas, F, RESIDCOVMAT)
+    fgrs = grs_test(
+        T=T,
+        N=N,
+        num_factors=len(factors),
+        alphas=results["alpha"],
+        factors=F,
+        residcovmat=RESIDCOVMAT,
+    )
     p_grs = f.sf(fgrs, N, T - N - num_factors)
     f_crit = f.ppf(0.95, N, T - N - num_factors)
 
@@ -326,9 +368,10 @@ def run_model(data, portfolio, factors):
         "one_shot": one_shot_results,
         "consistency": consistency_results,
     }
-    export_results_to_excel(
-        model_results=model_results, factors=factors, portfolio=portfolio
-    )
+    if export:
+        export_results_to_excel(
+            model_results=model_results, factors=factors, portfolio=portfolio
+        )
 
     return model_results
 
@@ -455,6 +498,109 @@ def prompt_factor_models(factor_options):
             print(f"Invalid input: {err} Please try again.\n")
 
 
+def run_table6_validation(
+    part1_workbook_path,
+    class_workbook_path,
+):
+    """Run Part 1 and historical Table A2 validation."""
+
+    factors_ff3 = ["RMRF", "SMB", "HML"]
+
+    # Part 1: 30-year validation period
+    part1_data = load_part1_data(part1_workbook_path)
+
+    part1_data = part1_data[
+        (part1_data[DATE_COL] >= 199610) & (part1_data[DATE_COL] <= 202609)
+    ].reset_index(drop=True)
+
+    if len(part1_data) != 360:
+        raise ValueError(f"Part 1 requires 360 months, found {len(part1_data)}.")
+
+    part1_results = run_model(part1_data, PORTFOLIO_COLS, factors_ff3, export=False)
+
+    wb = load_workbook(
+        part1_workbook_path,
+        data_only=True,
+        read_only=True,
+    )
+
+    try:
+        ws = wb["Tables"]
+        table_values = list(
+            ws.iter_rows(
+                min_row=1,
+                max_row=101,
+                min_col=1,
+                max_col=15,
+                values_only=True,
+            )
+        )
+    finally:
+        wb.close()
+
+    part1_reference = read_part1_reference(table_values)
+
+    # print("Reference keys:", part1_reference.keys())
+    # print("Calculated keys:", part1_results.keys())
+    part1_diffs = v.validate_model_results(
+        part1_results,
+        part1_reference,
+    )
+
+    class_data = load_excel_data(class_workbook_path)
+
+    class_sample = class_data[
+        (class_data[DATE_COL] >= 196302) & (class_data[DATE_COL] <= 199301)
+    ].reset_index(drop=True)
+
+    if len(class_sample) != 360:
+        raise ValueError(
+            f"Class benchmark requires 360 months, " f"found {len(class_sample)}."
+        )
+
+    capm_results = run_model(
+        class_sample,
+        PORTFOLIO_COLS,
+        ["RMRF"],
+        export=False,
+    )
+
+    ff3_results = run_model(
+        class_sample,
+        PORTFOLIO_COLS,
+        factors_ff3,
+        export=False,
+    )
+
+    class_reference = read_class_reference()
+
+    class_diffs = v.validate_class_benchmark(
+        capm_results,
+        ff3_results,
+        class_reference,
+    )
+    print("\n" + "=" * 60)
+    print("TABLE 6: VALIDATION")
+    print("=" * 60)
+
+    print("\nPART 1 WORKBOOK COMPARISON")
+    for category, difference in part1_diffs.items():
+        print(f"{category}: {difference:.10e}")
+
+    print("\nCLASS TABLE A2 COMPARISON")
+    for category, difference in class_diffs.items():
+        if difference is not None:
+            print(f"{category}: {difference:.10e}")
+
+    export_validation_table(
+        part1_diffs=part1_diffs,
+        class_diffs=class_diffs,
+        output_path="results/Table_6_Validation.xlsx",
+    )
+
+    return part1_diffs, class_diffs
+
+
 # --- Main ---
 """Chat prompt: Add a section to main that organizes and displays the results for each model type"""
 
@@ -559,56 +705,16 @@ def main():
             "Consistency": consistency_df,
         }
 
-        # --- Display Results ---
-        print(f"\n{'=' * 60}")
-        print(f"{model_name.upper()} RESULTS")
-        print(f"{'=' * 60}")
+        display_results(model_name, results, output_tables)
 
-        # Factor summary statistics
-        print("\nFactor Summary Statistics:")
-        print(factor_summary_df.round(4).to_string())
+        generate_summary(results, model_name)
 
-        # Portfolio expected returns
-        print("\nPortfolio Raw Return Summary:")
-        print(results["portfolio_summary"].round(6))
-
-        print("\nTime-Series Regression:")
-        print(regression_df.round(4).to_string())
-
-        print("\nGRS Joint Alpha Test:")
-        print(grs_df.round(4).to_string())
-
-        print("\nOne-Shot Cross-Sectional Regression:")
-        print(one_shot_df.round(4).to_string())
-        print(f"Cross-sectional R²: {one_shot['r_squared']:.4f}")
-
-        print("\nFama-MacBeth Cross-Sectional Regression:")
-        print(fm_df.round(4).to_string())
-
-        # Model consistency
-        print("\nModel Consistency Checks:")
-        print(consistency_df.round(4).to_string())
-
-        print(
-            f"\nOne-Shot Pricing Intercept: " f"{consistency['one_shot_intercept']:.6f}"
-        )
-
-        print(f"Fama-MacBeth Pricing Intercept: " f"{consistency['fm_intercept']:.6f}")
-
-        print(
-            f"Fama-MacBeth Intercept t-statistic: "
-            f"{consistency['fm_intercept_t']:.4f}"
-        )
-
-    # --- Plots ---
-
+    # Plots
     rawrets = sample[portfolio_cols].to_numpy(dtype=float)
     rf = sample["RF"].to_numpy(dtype=float).reshape(-1, 1)
 
-    # Calculate excess returns using existing function
     rets = excess_returns(rawrets, rf)
 
-    # Portfolio excess returns bar chart
     plot_portfolio_returns(rets, portfolio_cols)
 
     # SML scatter plot (CAPM only)
@@ -617,7 +723,9 @@ def main():
         expected_returns = rets.mean(axis=0)
 
         plot_sml(betas, expected_returns, portfolio_cols)
-    # --- Compare Models ---
+
+    # Model comparison
+
     comparison_df = pd.concat([output_tables[name]["GRS"] for name in output_tables])
 
     print(f"\n{'=' * 60}")
@@ -625,8 +733,17 @@ def main():
     print(f"{'=' * 60}")
     print(comparison_df.round(4).to_string())
 
+    # Table 6
 
-# main()
+    part1_workbook = Path("data/project2_part1.xlsx")
+
+    class_workbook = Path("data/CAPM_FF3F_Raw_Data_SizeBM.xlsx")
+
+    run_table6_validation(
+        part1_workbook_path=part1_workbook,
+        class_workbook_path=class_workbook,
+    )
+
 
 if __name__ == "__main__":
     main()

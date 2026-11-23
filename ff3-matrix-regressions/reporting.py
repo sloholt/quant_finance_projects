@@ -318,3 +318,255 @@ def plot_sml(betas, expected_returns, portfolio_cols):
 
     plt.tight_layout()
     plt.show()
+
+
+def generate_summary(results, model_name):
+    """Generate deterministic model interpretation."""
+
+    p_value = results["grs_pvalue"]
+    f_stat = results["grs_stat"]
+
+    if p_value < 0.05:
+        conclusion = (
+            "The GRS test rejects the hypothesis that "
+            "all portfolio alphas are jointly zero."
+        )
+    else:
+        conclusion = (
+            "The GRS test fails to reject the hypothesis "
+            "that all portfolio alphas are jointly zero."
+        )
+
+    return (
+        f"\n{model_name} Summary:\n"
+        f"GRS F-statistic: {f_stat:.4f}\n"
+        f"GRS p-value: {p_value:.4g}\n"
+        f"{conclusion}"
+    )
+
+
+def generate_summary(results, model_name):
+    """Generate deterministic model interpretation."""
+
+    p_value = results["grs_pvalue"]
+    f_stat = results["grs_stat"]
+
+    if p_value < 0.05:
+        conclusion = (
+            "The GRS test rejects the hypothesis that "
+            "all portfolio alphas are jointly zero."
+        )
+    else:
+        conclusion = (
+            "The GRS test fails to reject the hypothesis "
+            "that all portfolio alphas are jointly zero."
+        )
+
+    return (
+        f"\n{model_name} Summary:\n"
+        f"GRS F-statistic: {f_stat:.4f}\n"
+        f"GRS p-value: {p_value:.4g}\n"
+        f"{conclusion}"
+    )
+
+
+def display_results(model_name, results, output_tables):
+    """Display all statistical results for a model."""
+
+    tables = output_tables[model_name]
+
+    print(f"\n{'=' * 60}")
+    print(f"{model_name.upper()} RESULTS")
+    print(f"{'=' * 60}")
+
+    print("\nFactor Summary Statistics:")
+    print(tables["Factor Summary"].round(4).to_string())
+
+    print("\nPortfolio Raw Return Summary:")
+    print(results["portfolio_summary"].round(6).to_string())
+
+    for name in [
+        "Regression",
+        "GRS",
+        "One-Shot Cross-Sectional",
+        "Fama-MacBeth",
+        "Consistency",
+    ]:
+        print(f"\n{name}:")
+        print(tables[name].round(4).to_string())
+
+    print(f"\nCross-sectional R²: " f"{results['one_shot']['r_squared']:.4f}")
+
+    consistency = results["consistency"]
+
+    print(f"\nOne-Shot Pricing Intercept: " f"{consistency['one_shot_intercept']:.6f}")
+    print(f"Fama-MacBeth Pricing Intercept: " f"{consistency['fm_intercept']:.6f}")
+    print(
+        f"Fama-MacBeth Intercept t-statistic: " f"{consistency['fm_intercept_t']:.4f}"
+    )
+
+
+def export_validation_table(
+    part1_diffs,
+    class_diffs,
+    output_path="results/Table_6_Validation.xlsx",
+):
+    """Export both validation comparisons to Table 6."""
+
+    from pathlib import Path
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Table 6 Validation"
+
+    ws.merge_cells("A1:C2")
+    ws["A1"] = "Table 6: Numerical Validation"
+
+    headers = [
+        "Statistic",
+        "Part 1 vs Python (30 years)",
+        "Class Table A2 vs Python (196302–199301)",
+    ]
+
+    for col, header in enumerate(headers, 1):
+        ws.cell(4, col, header)
+
+    row_mapping = [
+        (
+            "Regression coefficients",
+            "Regression coefficients",
+            None,
+        ),
+        (
+            "Standard errors",
+            "Standard errors",
+            "Fama-MacBeth standard error",
+        ),
+        (
+            "t-statistics",
+            "t-statistics",
+            "Fama-MacBeth t-statistic",
+        ),
+        (
+            "GRS F-statistic and p-value",
+            "GRS F statistic and p-value",
+            "GRS statistic and p-value",
+        ),
+        (
+            "GRS critical value",
+            None,
+            "GRS critical value",
+        ),
+        (
+            "One-shot gammas and standard errors",
+            "One-shot gammas and standard errors",
+            "One-shot gamma and standard error",
+        ),
+        (
+            "Fama-MacBeth gammas",
+            "Fama-MacBeth gammas, standard errors, t-statistics",
+            "Fama-MacBeth gamma",
+        ),
+        (
+            "Cross-sectional R-squared",
+            None,
+            "Cross-sectional R-squared",
+        ),
+        (
+            "Factor means",
+            None,
+            "Factor means",
+        ),
+    ]
+
+    tolerance = 1e-6
+
+    for row, (label, part1_key, class_key) in enumerate(row_mapping, 5):
+        ws.cell(row, 1, label)
+
+        for col, diffs, key in [
+            (2, part1_diffs, part1_key),
+            (3, class_diffs, class_key),
+        ]:
+            value = diffs.get(key) if key else None
+            cell = ws.cell(row, col)
+
+            if value is None:
+                cell.value = "N/A"
+            else:
+                value = abs(float(value))
+                cell.value = value
+                cell.number_format = "0.000000000E+00"
+
+                cell.fill = PatternFill(
+                    "solid",
+                    fgColor=("E2F0D9" if value < tolerance else "FCE8E6"),
+                )
+
+    last_row = 4 + len(row_mapping)
+
+    ws.cell(last_row + 2, 1, "Required tolerance")
+    ws.cell(last_row + 2, 2, tolerance)
+    ws.cell(last_row + 2, 2).number_format = "0.0E+00"
+
+    ws.merge_cells(
+        start_row=last_row + 4,
+        start_column=1,
+        end_row=last_row + 4,
+        end_column=3,
+    )
+
+    note = ws.cell(last_row + 4, 1)
+    note.value = (
+        "Class Table A2 values are rounded; differences against "
+        "displayed values do not establish full-precision agreement. "
+        "Investigate material discrepancies before attributing them "
+        "to library or data revisions."
+    )
+    note.alignment = Alignment(
+        wrap_text=True,
+        vertical="center",
+    )
+    ws.row_dimensions[last_row + 4].height = 42
+
+    navy = "17365D"
+
+    for row in [1, 4]:
+        for cell in ws[row][:3]:
+            cell.fill = PatternFill(
+                "solid",
+                fgColor=navy,
+            )
+            cell.font = Font(
+                bold=True,
+                color="FFFFFF",
+            )
+            cell.alignment = Alignment(
+                wrap_text=True,
+                vertical="center",
+            )
+
+    ws["A1"].font = Font(
+        size=15,
+        bold=True,
+        color="FFFFFF",
+    )
+
+    ws.column_dimensions["A"].width = 45
+    ws.column_dimensions["B"].width = 32
+    ws.column_dimensions["C"].width = 43
+
+    ws.row_dimensions[4].height = 42
+    ws.freeze_panes = "B5"
+    ws.sheet_view.showGridLines = False
+
+    wb.save(output_path)
+
+    print(f"\nValidation table saved: {output_path.resolve()}")
+
+    return output_path
