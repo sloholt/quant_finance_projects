@@ -168,7 +168,7 @@ def grs_test(
 
     # factor_covmat = factor_demeaned.T @ factor_demeaned / (T - 1)
     # first_term = (T - N - num_factors) / N
-    factor_covmat = factor_demeaned.T @ factor_demeaned / T  # MLE, not T-1
+    factor_covmat = factor_demeaned.T @ factor_demeaned / (T - num_factors - 1)
     first_term = (T - N - num_factors) / N * T / (T - num_factors - 1)
 
     # Check matrix conditioning
