@@ -6,6 +6,10 @@ This project tests CAPM, Fama–French three-factor, and other selected factor m
 
 From the project root, using Python 3.10+:  
 
+```bash
+pip install -r requirements.txt
+```
+
 To launch the interactive dashboard:  
 
 ```bash
@@ -15,7 +19,6 @@ Open `http://127.0.0.1:8050`. The dashboard uses the same calculations and expec
 
 To view the command-line only model:  
 ```bash
-pip install -r requirements.txt
 python asset_pricing_analysis.py
 ```
 
